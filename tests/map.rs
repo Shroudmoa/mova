@@ -3,7 +3,8 @@
 //!
 //! Run with `cargo test`.
 
-use mova::solid::{SolidGrid, CELL};
+use mova::game::{ARENA_HX, ARENA_HY};
+use mova::solid::{SolidGrid, CELL, COLS, PERIOD_X, PERIOD_Y, ROWS, SIGHT};
 
 /// The generator promises one connected floor with no trapped pockets, so the
 /// only place that can be sealed is the plaza itself. If the map ever came out
@@ -31,46 +32,41 @@ const SEEDS: [u32; 8] = [
     0xFFFF_FFFF,
 ];
 
+/// Flat index of a lattice cell. Wraps, because the arena does.
+fn idx(i: i32, j: i32) -> usize {
+    let i = (i + COLS / 2).rem_euclid(COLS);
+    let j = (j + ROWS / 2).rem_euclid(ROWS);
+    (j * COLS + i) as usize
+}
+
 fn connected(seed: u32) {
     let grid = SolidGrid::new(seed);
     assert!(!grid.inside(0.0, 0.0), "spawn plaza must be open");
 
-    // Walk outward from the plaza on the lattice, same way the generator's own
-    // flood does, and confirm every free cell is reachable.
-    let cols = 19i32;
-    let rows = 11i32;
-    let half_w = cols / 2;
-    let half_h = rows / 2;
-
-    let idx = |i: i32, j: i32| ((j + half_h) * cols + (i + half_w)) as usize;
-
-    let mut occupied = vec![false; (cols * rows) as usize];
-    for i in -half_w..=half_w {
-        for j in -half_h..=half_h {
+    let mut occupied = vec![false; (COLS * ROWS) as usize];
+    for i in -COLS / 2..=COLS / 2 {
+        for j in -ROWS / 2..=ROWS / 2 {
             occupied[idx(i, j)] = grid.inside(i as f32 * CELL, j as f32 * CELL);
         }
     }
 
     let free: Vec<usize> = (0..occupied.len()).filter(|&k| !occupied[k]).collect();
     assert!(
-        free.len() > 40,
-        "seed {seed:#x} produced a map too sparse to be a map: {}",
-        free.len()
+        free.len() > COLS as usize * ROWS as usize / 3,
+        "seed {seed:#x} produced a map too sparse to be a map: {} of {} cells open",
+        free.len(),
+        occupied.len()
     );
 
     let mut seen = vec![false; occupied.len()];
     let mut stack = vec![idx(0, 0)];
     seen[idx(0, 0)] = true;
     while let Some(k) = stack.pop() {
-        let i = (k as i32 % cols) - half_w;
-        let j = (k as i32 / cols) - half_h;
+        let i = (k as i32 % COLS) - COLS / 2;
+        let j = (k as i32 / COLS) - ROWS / 2;
         for dj in -1..=1i32 {
             for di in -1..=1i32 {
-                let (ni, nj) = (i + di, j + dj);
-                if ni < -half_w || nj < -half_h || ni > half_w || nj > half_h {
-                    continue;
-                }
-                let m = idx(ni, nj);
+                let m = idx(i + di, j + dj);
                 if seen[m] || occupied[m] {
                     continue;
                 }
@@ -87,6 +83,98 @@ fn connected(seed: u32) {
         "seed {seed:#x} sealed off part of the floor: {reached} of {} cells reached",
         free.len()
     );
+}
+
+/// The spawn has to be somewhere you can see, and somewhere you can run.
+///
+/// The one thing the generator kept getting wrong was crowding the plaza. A
+/// landmark stamped one cell east of the origin put sixty units of wall twenty
+/// units from MOVA's nose — a third of the screen — so the first three seconds of
+/// every run were spent looking at the side of a building, and the "borderless
+/// arena, keep moving, never cornered" pitch was a lie you noticed before you had
+/// pressed anything.
+///
+/// The bug was the shape of the keep-out, not the intent. It read
+/// `|i| <= r && |j| <= r`: a square, so it rejected a spot only when *both*
+/// coordinates were close, and anything off to one side walked straight through.
+/// Two fixes now, and this pins the one that decides the outcome. `open_sight`
+/// clears the disc after the last stamp whatever asked for it, because a centre
+/// is not a silhouette and a ring or a bar can reach across a line its own spot
+/// respected. `spot` also keeps each stamp's centre outside `SIGHT` plus the
+/// stamp's own reach, so nothing is *aimed* at the plaza — but that is intent
+/// rather than guarantee, and this deliberately does not pin it. Replacing
+/// `spot`'s keep-out with the square it used to be leaves every assertion here
+/// passing, because `open_sight` is doing the work. Testing it anyway would mean
+/// a test that fails when the map is built a different way for a reason nobody
+/// asked about.
+///
+/// Read from the generator's own constant, not a copy of it. A test that spells
+/// the number out is a test that goes on passing after the spawn is narrowed to
+/// fit the map again, which is the mistake being guarded against here.
+#[test]
+fn the_spawn_opens_onto_open_ground() {
+    for &seed in &SEEDS {
+        let grid = SolidGrid::new(seed);
+        for j in -SIGHT..=SIGHT {
+            for i in -SIGHT..=SIGHT {
+                // A disc, not the square. The square is the shape of the bug: it
+                // is blind to anything off to one side, which is where the
+                // offending landmark went.
+                if i * i + j * j > SIGHT * SIGHT {
+                    continue;
+                }
+                assert!(
+                    !grid.inside(i as f32 * CELL, j as f32 * CELL),
+                    "seed {seed:#x} put furniture at cell ({i},{j}), {SIGHT} cells \
+                     from the spawn: a landmark is crowding the plaza and the run \
+                     opens against a wall"
+                );
+            }
+        }
+    }
+}
+
+/// The wrap is only seamless if the arena's geometry actually repeats. v3 reads
+/// every neighbour through a wrapped lattice index, so a query has to give the
+/// same answer a whole period away as it does here — otherwise there is a
+/// discontinuity somewhere on the seam, and since the camera keeps following,
+/// MOVA finds it a few seconds in and it becomes the most memorable thing on the
+/// map.
+///
+/// Both axes, and sampled away from the lattice points themselves, so this is a
+/// statement about the collision surface rather than about the block centres.
+#[test]
+fn the_seam_is_not_a_discontinuity() {
+    let period = (PERIOD_X, PERIOD_Y);
+    let r = 1.0f32;
+    for seed in SEEDS {
+        let grid = SolidGrid::new(seed);
+        for i in 0..40 {
+            for j in 0..29 {
+                // A pseudo-random sample, deterministic in `i`/`j`.
+                let x = (i as f32 * 7.31 + j as f32 * 3.17).sin() * (ARENA_HX - 10.0);
+                let y = (j as f32 * 5.53 - i as f32 * 2.29).cos() * (ARENA_HY - 10.0);
+
+                assert_eq!(
+                    grid.hit(x, y, r),
+                    grid.hit(x + period.0, y, r),
+                    "seed {seed:#x}: x={x:.1} y={y:.1} is solid on one side of the \
+                     vertical seam and open on the other"
+                );
+                assert_eq!(
+                    grid.hit(x, y, r),
+                    grid.hit(x, y + period.1, r),
+                    "seed {seed:#x}: x={x:.1} y={y:.1} is solid on one side of the \
+                     horizontal seam and open on the other"
+                );
+                assert_eq!(
+                    grid.inside(x, y),
+                    grid.inside(x + period.0, y + period.1),
+                    "seed {seed:#x}: burial differs across the corner of the seam"
+                );
+            }
+        }
+    }
 }
 
 /// Push-out has to work in every direction, including from deep inside a block

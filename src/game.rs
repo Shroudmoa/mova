@@ -8,13 +8,15 @@ use crate::player::{self, Player};
 use crate::projectile::{self, Projectile};
 use crate::region;
 use crate::save::{self, Save};
-use crate::score::{Fx, PopKind, Score};
+use crate::score::{Fx, PopKind, Score, EMBER};
 use crate::solid::SolidGrid;
 
-/// Half-extents of the play space in world units. The camera follows MOVA
-/// through this, so it is sized to give room to run rather than to fit a screen.
-pub const ARENA_HX: f32 = 120.0;
-pub const ARENA_HY: f32 = 70.0;
+/// Half-extents of the play space in world units. There is no wall at either:
+/// the arena is a torus of `PERIOD_X` by `PERIOD_Y`, and running off one side
+/// brings you in on the other. These are the sizes the camera eases between and
+/// the sizes everything else is expressed in.
+pub const ARENA_HX: f32 = crate::solid::PERIOD_X * 0.5;
+pub const ARENA_HY: f32 = crate::solid::PERIOD_Y * 0.5;
 /// Seconds per wave.
 pub const WAVE_TIME: f32 = 14.0;
 const MAX_ENEMIES: usize = 140;
@@ -26,6 +28,42 @@ const GRAZE_RANGE: f32 = 3.4;
 pub const RAM_AT: f32 = 0.55;
 /// Ramming is worth roughly two bullets, so it is a choice and not a default.
 const RAM_MULT: f32 = 1.95;
+
+/// How far from an ember still counts as running into the trail, in units, before
+/// the enemy's own radius is added. Wide enough that the tail is a line and not a
+/// dotted one — the embers are spaced one and a bit units apart, so anything
+/// narrower would leave gaps you can stand an enemy in.
+const WAKE_REACH: f32 = 1.6;
+
+/// Seconds before the same enemy can be cut twice. Long enough that a body
+/// travelling along a trail gets hit once rather than once per ember it passes,
+/// and short enough that a trail wrapped back onto itself still cuts.
+const WAKE_CD: f32 = 0.55;
+
+/// What a wake kill pays, before the enemy's own multiplier. Above a bullet and
+/// below a ram: the line is worth more than the gun and less than the contact.
+const WAKE_MULT: f32 = 1.35;
+
+/// The widest enemy on the board, so one reach covers all of them.
+fn max_enemy_r(enemies: &[Enemy]) -> f32 {
+    enemies.iter().map(|e| e.r).fold(0.0f32, f32::max)
+}
+
+/// How far a nova reaches, before the enemy's own radius. Big against the wake,
+/// which is a blade's width: the whole difference between the two is that the
+/// wake is where you have been and a nova is where you are, and a shockwave you
+/// cannot see the edge of is worth reaching for in a crowd.
+const NOVA_REACH: f32 = 11.0;
+
+/// How far a nova throws whatever it catches. Enough to take an enemy off the
+/// ground MOVA is about to cross, which is the point: a nova is not damage, it is
+/// an opening.
+const NOVA_PUSH: f32 = 26.0;
+
+/// What a nova kill pays, before the enemy's own multiplier. Under a ram, over
+/// the wake: it is the biggest thing MOVA owns that does not require touching the
+/// enemy, and the payment says so.
+const NOVA_MULT: f32 = 1.7;
 
 /// Points awarded the first time a run reaches a sector. Scales with how many
 /// sectors are already known, so the last corner is worth the most.
@@ -58,10 +96,42 @@ impl Arena {
         }
     }
 
+    /// Folds a position back into `(-h, h]`. The seam is not a wall, so this is
+    /// not a collision resolve — it is a teleport to the far side, and every
+    /// caller that cares about it (the camera) has to take the short way round.
     #[inline]
-    pub fn clamp(&self, x: &mut f32, y: &mut f32) {
-        *x = x.clamp(-self.hx, self.hx);
-        *y = y.clamp(-self.hy, self.hy);
+    pub fn wrap_axis(v: f32, h: f32) -> f32 {
+        (v + h).rem_euclid(h * 2.0) - h
+    }
+
+    /// Signed distance from `from` to `to` the short way round the seam.
+    ///
+    /// Without this the camera eases the long way when MOVA crosses, which on a
+    /// world this size means a five-second pan across the whole arena every time
+    /// you run off one edge.
+    #[inline]
+    pub fn delta_axis(from: f32, to: f32, h: f32) -> f32 {
+        let d = (to - from).rem_euclid(h * 2.0);
+        if d > h {
+            d - h * 2.0
+        } else {
+            d
+        }
+    }
+
+    #[inline]
+    pub fn wrap(&self, x: f32, y: f32) -> (f32, f32) {
+        (Self::wrap_axis(x, self.hx), Self::wrap_axis(y, self.hy))
+    }
+
+    /// Straight-line distance between two points, measured the short way round.
+    #[inline]
+    pub fn distance(&self, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+        let (dx, dy) = (
+            Self::delta_axis(ax, bx, self.hx),
+            Self::delta_axis(ay, by, self.hy),
+        );
+        (dx * dx + dy * dy).sqrt()
     }
 }
 
@@ -273,6 +343,8 @@ impl Game {
         self.fire_tick(dt);
         self.bullets_tick(dt);
         self.pickups_tick(dt);
+        self.nova_tick();
+        self.wake_tick();
         self.collide();
         self.score.update(dt);
         self.fx.update(dt);
@@ -294,26 +366,25 @@ impl Game {
         self.cam_follow(dt);
     }
 
-    /// Eases the camera toward MOVA and keeps the view inside the arena.
+    /// Eases the camera toward MOVA the short way round the seam.
+    ///
+    /// There is nothing to clamp against any more, which is the whole point of
+    /// the torus: the camera is free to follow MOVA anywhere and forever, and
+    /// there is no corner of the map where it stops.
     ///
     /// Public for the same reason [`Self::set_view`] is: it is a step of the
     /// simulation, and a test that has to settle the camera should be able to
     /// run it without also simulating twenty seconds of a run.
     pub fn cam_follow(&mut self, dt: f32) {
         // Framerate independent easing, so the camera feels the same at any step.
-        let k = 1.0 - (-11.0 * dt).exp();
-        self.cam_x += (self.player.x - self.cam_x) * k;
-        self.cam_y += (self.player.y - self.cam_y) * k;
-        // How far the view is allowed to travel before the arena wall stops it.
-        // The view is far smaller than the arena on any normal terminal, so this
-        // is normally the whole arena and the camera is free to follow MOVA all
-        // the way to the corner. It only bites on a window big enough to see
-        // past the edge, where pinning to the middle is what keeps the void
-        // off screen.
-        let lx = (ARENA_HX - self.view_hx).max(0.0);
-        let ly = (ARENA_HY - self.view_hy).max(0.0);
-        self.cam_x = self.cam_x.clamp(-lx, lx);
-        self.cam_y = self.cam_y.clamp(-ly, ly);
+        // The factor 40 ensures the camera keeps up with MOVA at cap speed
+        // (44 units/frame) on the borderless torus arena.
+        let k = 1.0 - (-40.0 * dt).exp();
+        // Taken as a wrapped delta, so crossing the seam is a step and not a
+        // pan. Both ends of the ease are inside the period, so the camera lands
+        // on MOVA's side of it rather than drifting off on its own.
+        self.cam_x += Arena::delta_axis(self.cam_x, self.player.x, self.arena.hx) * k;
+        self.cam_y += Arena::delta_axis(self.cam_y, self.player.y, self.arena.hy) * k;
     }
 
     // ---- sectors ---------------------------------------------------------
@@ -348,7 +419,7 @@ impl Game {
         // The banner names the sector; the popup only carries the payout.
         self.fx
             .pop(self.player.x, self.player.y, pts, PopKind::Found);
-        self.fx.ring(self.player.x, self.player.y, true);
+        self.fx.ring(self.player.x, self.player.y, true, true);
     }
 
     // ---- pressure -------------------------------------------------------
@@ -403,9 +474,12 @@ impl Game {
         }
     }
 
-    /// Spawns on a ring just outside the view. If that ring runs past the arena
-    /// wall or lands inside a pillar, the position is folded back in and the
-    /// angle is re-rolled until it is both valid and clear of MOVA.
+    /// Spawns on a ring just outside the view. If that ring runs past the seam
+    /// or lands inside a pillar, the position is folded back in and the angle is
+    /// re-rolled until it is both valid and clear of MOVA.
+    ///
+    /// Everything is measured with [`Arena::distance`], so an enemy that comes
+    /// in from the far side of the seam counts as arriving, which is what it is.
     fn spawn_enemy(&mut self) {
         let (px, py) = (self.player.x, self.player.y);
         let view_r = (self.view_hx * self.view_hx + self.view_hy * self.view_hy).sqrt();
@@ -415,11 +489,10 @@ impl Game {
         for _ in 0..6 {
             let a = self.rnd() * std::f32::consts::TAU;
             let r = view_r * (1.04 + self.rnd() * 0.22);
-            x = px + a.cos() * r;
-            y = py + a.sin() * r;
-            self.arena.clamp(&mut x, &mut y);
-            let (dx, dy) = (x - px, y - py);
-            let far_enough = dx * dx + dy * dy > 25.0 * 25.0;
+            let (cand_x, cand_y) = self.arena.wrap(px + a.cos() * r, py + a.sin() * r);
+            x = cand_x;
+            y = cand_y;
+            let far_enough = self.arena.distance(px, py, x, y) > 25.0;
             if far_enough && !self.solids.inside(x, y) {
                 break;
             }
@@ -473,11 +546,13 @@ impl Game {
             if dx * dx + dy * dy < gap2 {
                 continue;
             }
-            // Do not stack two pickups into one unreadable pile.
+            // Do not stack two pickups into one unreadable pile. Measured across
+            // the seam, so two either side of the wrap do not land on top of
+            // each other on screen.
             if self
                 .pickups
                 .iter()
-                .any(|p| (p.x - x).powi(2) + (p.y - y).powi(2) < 100.0)
+                .any(|p| self.arena.distance(p.x, p.y, x, y) < 10.0)
             {
                 continue;
             }
@@ -504,15 +579,18 @@ impl Game {
             p.x = p.hx;
             p.y = p.hy + p.lift(lift);
 
-            let (dx, dy) = (px - p.x, py - p.y);
+            let dx = Arena::delta_axis(p.x, px, self.arena.hx);
+            let dy = Arena::delta_axis(p.y, py, self.arena.hy);
             let d2 = dx * dx + dy * dy;
             if d2 < magnet2 && d2 > 0.001 {
                 let d = d2.sqrt();
                 // The pull is refused if it would drag the pickup into a
                 // pillar. Cheap, and it stops an orb being sucked into a wall
                 // and becoming unreachable.
-                let nx = p.x + dx / d * pickup::MAGNET_PULL * dt;
-                let ny = p.y + dy / d * pickup::MAGNET_PULL * dt;
+                let (nx, ny) = self.arena.wrap(
+                    p.x + dx / d * pickup::MAGNET_PULL * dt,
+                    p.y + dy / d * pickup::MAGNET_PULL * dt,
+                );
                 if !self.solids.hit(nx, ny, 1.0) {
                     p.x = nx;
                     p.y = ny;
@@ -554,7 +632,7 @@ impl Game {
             Pick::Surge => {
                 self.player.surge();
                 self.fx.note(p.x, p.y, "SURGE", PopKind::Surge);
-                self.fx.ring(p.x, p.y, true);
+                self.fx.ring(p.x, p.y, true, true);
                 for _ in 0..8 {
                     let a = self.rnd() * std::f32::consts::TAU;
                     self.fx
@@ -568,7 +646,7 @@ impl Game {
                 }
                 self.player.hp += 1;
                 self.fx.note(p.x, p.y, "REPAIR", PopKind::Heal);
-                self.fx.ring(p.x, p.y, false);
+                self.fx.ring(p.x, p.y, false, true);
                 self.stats.heals += 1;
             }
         }
@@ -582,7 +660,8 @@ impl Game {
         let (px, py) = (self.player.x, self.player.y);
         let t = self.time;
         for e in self.enemies.iter_mut() {
-            e.update(dt, px, py, t, &self.solids);
+            e.wake_cd = (e.wake_cd - dt).max(0.0);
+            e.update(dt, px, py, t, &self.arena, &self.solids);
         }
     }
 
@@ -612,8 +691,6 @@ impl Game {
     }
 
     fn bullets_tick(&mut self, dt: f32) {
-        let hx = ARENA_HX + 6.0;
-        let hy = ARENA_HY + 6.0;
         let mut i = 0;
         while i < self.bullets.len() {
             let b = &mut self.bullets[i];
@@ -627,7 +704,11 @@ impl Game {
             if blocked {
                 self.fx.burst(b.x, b.y, 8.0);
             }
-            if b.life <= 0.0 || b.spent || blocked || b.x.abs() > hx || b.y.abs() > hy {
+            // Wrapped rather than culled. A shot fired at the right edge comes
+            // back in from the left, which is both what the player expects and
+            // what lets a lane be shot end to end.
+            (b.x, b.y) = self.arena.wrap(b.x, b.y);
+            if b.life <= 0.0 || b.spent || blocked {
                 self.bullets.swap_remove(i);
             } else {
                 i += 1;
@@ -636,6 +717,177 @@ impl Game {
     }
 
     // ---- resolution -----------------------------------------------------
+
+    /// A wall is a weapon, if you hit it hard enough.
+    ///
+    /// v3 gives the furniture its speed back on a reflection, which made the walls
+    /// the best way to turn without paying for the turn — the one thing on a
+    /// wrap-around map that is worth more than it costs, since there is no corner
+    /// to lose momentum in and the furniture is the only corner there is. This
+    /// pays for it. A bounce at ram speed throws a nova: damage, and a shove that
+    /// clears a space in front of MOVA.
+    ///
+    /// The shove is the reason it is not just a second wake. Damage on contact is
+    /// something you aim; a nova opens ground you were not going to get to, and
+    /// the interesting bounce on a torus is always the one taken *into* a crowd
+    /// with the crowd behind it.
+    ///
+    /// Gated at [`RAM_AT`], the same threshold the ram uses and the one the hint
+    /// and the gauge already speak. Slow drift, lean, drift-off-a-post does not
+    /// fire it, because a shockwave that came with every contact would make the
+    /// furniture loud instead of useful.
+    ///
+    /// Consumes the bounce signal rather than polling it, so two reflections
+    /// inside one step are one nova. There was one reflection; there should be one
+    /// ring.
+    pub fn nova_tick(&mut self) {
+        if self.player.bounce_t <= 0.0 {
+            return;
+        }
+        self.player.bounce_t = 0.0;
+        if self.player.speed_ratio() < RAM_AT {
+            return;
+        }
+        let (px, py) = (self.player.x, self.player.y);
+        let (hx, hy) = (self.arena.hx, self.arena.hy);
+        let reach = NOVA_REACH + max_enemy_r(&self.enemies);
+        let reach2 = reach * reach;
+        self.fx.ring(px, py, true, true);
+        for _ in 0..8 {
+            let a = self.rnd() * std::f32::consts::TAU;
+            self.fx
+                .particle(px, py, a.cos() * 30.0, a.sin() * 30.0, 0.24, 0);
+        }
+
+        for ei in 0..self.enemies.len() {
+            // Wrapped for the same reason the wake is: the ring is drawn wrapped,
+            // and MOVA has just come off a wall near the seam as often as not.
+            let dx = Arena::delta_axis(px, self.enemies[ei].x, hx);
+            let dy = Arena::delta_axis(py, self.enemies[ei].y, hy);
+            let d2 = dx * dx + dy * dy;
+            if self.enemies[ei].dead || d2 > reach2 {
+                continue;
+            }
+            // Out along the away-normal, and never out along a zero one: an enemy
+            // at the exact centre of a nova has no direction to be thrown, and
+            // normalising there would throw it at one of the walls of the world.
+            let d = d2.sqrt();
+            let (ux, uy) = if d > 0.001 {
+                (dx / d, dy / d)
+            } else {
+                (1.0, 0.0)
+            };
+            let e = &mut self.enemies[ei];
+            e.x += ux * NOVA_PUSH;
+            e.y += uy * NOVA_PUSH;
+            (e.x, e.y) = self.arena.wrap(e.x, e.y);
+            e.hit = 0.10;
+            e.hp = e.hp.saturating_sub(1);
+            let killed = e.hp == 0;
+            e.dead = killed;
+            let (mut nx, mut ny, r) = (e.x, e.y, e.r);
+            // Into anything it landed in, the shove has to give way or the enemy
+            // is stored inside a wall until its own update notices. The three
+            // values come out of the roster first because the grid and the roster
+            // are fields of the same struct, and passing `&mut self.enemies[ei].x`
+            // next to `self.enemies[ei].r` is two borrows of one struct at once.
+            self.solids.push_out(&mut nx, &mut ny, r);
+            self.enemies[ei].x = nx;
+            self.enemies[ei].y = ny;
+            if killed {
+                self.nova_kill(ei);
+            }
+        }
+    }
+
+    /// What a nova kill pays, before the enemy's own multiplier.
+    fn nova_kill(&mut self, ei: usize) {
+        let (x, y) = (self.enemies[ei].x, self.enemies[ei].y);
+        let kind = self.enemies[ei].kind;
+        let (pts, _) = self
+            .score
+            .kill_at(self.player.speed_ratio(), NOVA_MULT * kind.mult());
+        self.fx.burst(x, y, 20.0);
+        self.fx.ring(x, y, false, true);
+        self.fx.pop(x, y, pts, PopKind::Ram);
+        self.stats.kills += 1;
+    }
+
+    /// MOVA's wake is a weapon.
+    ///
+    /// The trail was already there and already the longest thing he draws, and it
+    /// was the one part of the picture with nothing to do. At the cap it is now
+    /// what happens to anything that runs into it, which changes what the cap is
+    /// *for*: it was immunity — a thing to hold while you got out — and it is now
+    /// the strongest thing you own. A line drawn across a crowd from one side to
+    /// the other is worth more than the same crowd met head-on, because the ram
+    /// spends the contact while the line is already past everything behind you.
+    ///
+    /// Only at the cap. Below it the trail is not drawn and not a weapon, and the
+    /// threshold is the same one every other part of the game reads, so this needs
+    /// no state of its own to stay consistent with the gauge on the screen.
+    ///
+    /// Measured against the embers rather than a separate trail object, so what
+    /// cuts something is exactly what you can see cutting it. Anything can be
+    /// overwritten between an ember and the frame, but not between the ember and
+    /// the hit check — and there is no second shape to keep in sync with the first.
+    pub fn wake_tick(&mut self) {
+        if !self.player.blazing() {
+            return;
+        }
+        let (hx, hy) = (self.arena.hx, self.arena.hy);
+        let reach = WAKE_REACH + max_enemy_r(&self.enemies);
+        let reach2 = reach * reach;
+        // The trail's positions, taken before anything can be killed: a kill
+        // spawns a burst and a ring, which grow `parts`, and a body held across a
+        // call that pushes into it is a body the borrow checker is right about.
+        let embers: Vec<(f32, f32)> = self
+            .fx
+            .parts
+            .iter()
+            .filter(|p| p.kind == EMBER)
+            .map(|p| (p.x, p.y))
+            .collect();
+        for (px, py) in &embers {
+            for ei in 0..self.enemies.len() {
+                let e = &self.enemies[ei];
+                if e.dead || e.wake_cd > 0.0 {
+                    continue;
+                }
+                // Wrapped, because the trail is drawn wrapped. An ember left
+                // against one edge of the map and an enemy standing just past
+                // the other are drawn touching, so a wake that measured them
+                // raw would be a weapon with a hole in it exactly where the
+                // arena is least like itself.
+                let dx = Arena::delta_axis(*px, e.x, hx);
+                let dy = Arena::delta_axis(*py, e.y, hy);
+                if dx * dx + dy * dy > reach2 {
+                    continue;
+                }
+                self.enemies[ei].wake_cd = WAKE_CD;
+                self.enemies[ei].hit = 0.10;
+                self.enemies[ei].hp = self.enemies[ei].hp.saturating_sub(1);
+                if self.enemies[ei].hp == 0 {
+                    self.enemies[ei].dead = true;
+                    self.wake_kill(ei);
+                }
+            }
+        }
+    }
+
+    /// What a wake kill pays. Short of a ram on purpose: MOVA is not touching the
+    /// thing, so it should not pay as though he is.
+    fn wake_kill(&mut self, ei: usize) {
+        let (x, y) = (self.enemies[ei].x, self.enemies[ei].y);
+        let kind = self.enemies[ei].kind;
+        let (pts, _) = self
+            .score
+            .kill_at(self.player.speed_ratio(), WAKE_MULT * kind.mult());
+        self.fx.burst(x, y, 12.0);
+        self.fx.ring(x, y, false, true);
+        self.fx.pop(x, y, pts, PopKind::Kill);
+        self.stats.kills += 1;
+    }
 
     fn collide(&mut self) {
         let dashing = self.player.dashing();
@@ -652,7 +904,10 @@ impl Game {
                 }
                 let (ex, ey, er) = (self.enemies[ei].x, self.enemies[ei].y, self.enemies[ei].r);
                 let hit = projectile::RADIUS + er;
-                let (dx, dy) = (ex - bx, ey - by);
+                // Across the seam, so a shot fired at the edge connects with what
+                // MOVA is chasing on the other side of the map.
+                let dx = Arena::delta_axis(bx, ex, self.arena.hx);
+                let dy = Arena::delta_axis(by, ey, self.arena.hy);
                 if dx * dx + dy * dy <= hit * hit {
                     self.bullets[bi].spent = true;
                     let e = &mut self.enemies[ei];
@@ -673,7 +928,11 @@ impl Game {
                 continue;
             }
             let (ex, ey, er) = (self.enemies[ei].x, self.enemies[ei].y, self.enemies[ei].r);
-            let (dx, dy) = (ex - px, ey - py);
+            // Contact is measured the short way round, so touching an enemy that
+            // has just come through the wrap from the other side of the screen
+            // is contact, not a near miss on the far side of the world.
+            let dx = Arena::delta_axis(px, ex, self.arena.hx);
+            let dy = Arena::delta_axis(py, ey, self.arena.hy);
             let d2 = dx * dx + dy * dy;
 
             if dashing {
@@ -714,7 +973,7 @@ impl Game {
                 self.enemies[ei].y += uy * 2.2;
                 self.player.vx -= ux * 18.0;
                 self.player.vy -= uy * 18.0;
-                self.fx.ring(ex, ey, false);
+                self.fx.ring(ex, ey, false, true);
                 continue;
             }
 
@@ -722,7 +981,7 @@ impl Game {
                 self.stats.hits += 1;
                 self.score.break_combo();
                 self.fx.burst(px, py, 20.0);
-                self.fx.ring(px, py, true);
+                self.fx.ring(px, py, true, false);
                 for i in 0..5 {
                     let a = i as f32 * (std::f32::consts::TAU / 5.0);
                     self.fx
@@ -755,7 +1014,7 @@ impl Game {
         // Nudge sideways so kills in a crowd do not stack their popups.
         let jx = (self.rnd() - 0.5) * 5.0;
         self.fx.burst(x, y, 15.0);
-        self.fx.ring(x, y, kind.heavy());
+        self.fx.ring(x, y, kind.heavy(), false);
         self.fx.pop(
             x + jx,
             y,
@@ -774,7 +1033,7 @@ impl Game {
         let (pts, _) = self.score.kill_at(ratio, RAM_MULT);
         let jx = (self.rnd() - 0.5) * 4.0;
         self.fx.burst(x, y, 30.0);
-        self.fx.ring(x, y, true);
+        self.fx.ring(x, y, true, true);
         for _ in 0..4 {
             let a = self.rnd() * std::f32::consts::TAU;
             self.fx

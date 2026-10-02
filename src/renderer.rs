@@ -13,40 +13,58 @@ use ratatui::widgets::{Block, BorderType, Widget};
 use ratatui::Frame;
 
 use crate::enemy::Enemy;
-use crate::game::{Game, Phase, ARENA_HX, ARENA_HY};
+use crate::game::{Arena, Game, Phase, ARENA_HX, ARENA_HY};
 use crate::goal;
 use crate::pickup::Pickup;
 use crate::player::{Player, DASH_CD};
 use crate::region;
 use crate::save;
-use crate::solid::Solid;
+use crate::solid::{Solid, SolidGrid, CELL, EMPTY};
 
 // ---- palette --------------------------------------------------------------
-// Almost black, very dark purple, purple, deep red, bright red, pale text.
-// No green anywhere.
+// Two families, and the split between them is the single most load-bearing thing
+// in this file.
+//
+// MOVA used to be red, the same red as everything that wants him dead. At dash
+// speed the frame is mostly streak — his embers, the enemy, the blood of the
+// last one you hit, all smeared along the direction of travel — and "is that me
+// or is that the thing hunting me" became a question answered by looking closely
+// at a moving glyph. He is blue now, and everything that can hurt him stays warm.
+// Nothing else on screen is cold and moving, so at a glance, in peripheral
+// vision, at two hundred units a second, he is findable.
+//
+// Furniture is a cold violet: present, structural, never alive. Text is grey.
 
-const BG: Color = Color::Rgb(9, 6, 14);
-const GRID_FAR: Color = Color::Rgb(23, 13, 34);
-const GRID_NEAR: Color = Color::Rgb(44, 23, 62);
+const BG: Color = Color::Rgb(6, 9, 20);
+const GRID_FAR: Color = Color::Rgb(19, 26, 52);
+const GRID_NEAR: Color = Color::Rgb(37, 50, 94);
 /// Every fifth intersection: the landmarks that make a big arena navigable.
-const GRID_MARK: Color = Color::Rgb(76, 38, 104);
+const GRID_MARK: Color = Color::Rgb(64, 88, 152);
 /// Outer window chrome: the quietest line on screen.
-const CHROME: Color = Color::Rgb(40, 19, 57);
-/// The arena boundary. One step brighter so the play space is legible.
-const EDGE: Color = Color::Rgb(60, 28, 84);
-const DEEP: Color = Color::Rgb(78, 30, 112);
-const PURPLE: Color = Color::Rgb(160, 88, 216);
+const CHROME: Color = Color::Rgb(34, 43, 78);
+/// The coldest accent, and the bottom of every MOVA ramp.
+const DEEP: Color = Color::Rgb(20, 64, 136);
+/// MOVA's own colour.
+const COOL: Color = Color::Rgb(72, 158, 255);
+/// MOVA at his hottest: blazing, dashing, mid-ember. The near-white end of cold.
+const GLARE: Color = Color::Rgb(178, 236, 255);
+
+/// The warm family. Every one of these is a threat, or the memory of one: the
+/// enemies, the spark off MOVA's ribs when he is hit, the HP gauge, the flash
+/// that fills the frame when he dies. Keeping them out of the blues is what lets
+/// a colour on screen answer a question without the player reading any glyph.
 const DIM_RED: Color = Color::Rgb(116, 26, 44);
 const RED: Color = Color::Rgb(214, 48, 64);
 const HOT: Color = Color::Rgb(255, 106, 106);
-const PALE: Color = Color::Rgb(198, 192, 210);
-const FAINT: Color = Color::Rgb(96, 62, 124);
+
+const PALE: Color = Color::Rgb(206, 214, 240);
+const FAINT: Color = Color::Rgb(74, 98, 158);
 /// Pillar faces. Brighter than the floor grid, much dimmer than anything alive,
 /// so the map reads as structure rather than as another threat.
-const BLOCK_FAR: Color = Color::Rgb(38, 19, 55);
-const BLOCK_NEAR: Color = Color::Rgb(62, 32, 86);
+const BLOCK_FAR: Color = Color::Rgb(29, 27, 62);
+const BLOCK_NEAR: Color = Color::Rgb(50, 47, 96);
 /// The lit top edge of a block, which is what sells the height.
-const BLOCK_TOP: Color = Color::Rgb(104, 52, 142);
+const BLOCK_TOP: Color = Color::Rgb(90, 86, 154);
 
 const PLAYER: char = '●';
 /// A burning ember. Solid and distinct from every other particle so a trail
@@ -258,7 +276,7 @@ fn paused_panel(buf: &mut Buffer, area: Rect, game: &Game) {
         area,
         y - 1,
         "PAUSED",
-        Style::new().fg(mix(DEEP, HOT, pulse)).bg(BG),
+        Style::new().fg(mix(DEEP, COOL, pulse)).bg(BG),
     );
 
     let s = format!(
@@ -274,7 +292,7 @@ fn paused_panel(buf: &mut Buffer, area: Rect, game: &Game) {
         area,
         y + 2,
         region::NAMES[game.sector],
-        Style::new().fg(PURPLE).bg(BG),
+        Style::new().fg(COOL).bg(BG),
     );
     center(
         buf,
@@ -304,7 +322,7 @@ fn menu(buf: &mut Buffer, area: Rect, game: &Game) {
     let c = cam(inner, 0.0, 0.0);
     grid(buf, inner, &c, false);
     for s in &game.solids.solids {
-        draw_solid(buf, inner, &c, s, false);
+        draw_solid(buf, inner, &c, &game.solids, s, false);
     }
 
     // Slow pulse so the title never looks like a static screenshot.
@@ -312,7 +330,7 @@ fn menu(buf: &mut Buffer, area: Rect, game: &Game) {
     let rows = 13i32;
     let y = area.y as i32 + (area.height as i32 - rows) / 2;
 
-    centered_colored(buf, area, y, "M O V A", &[DEEP, PURPLE, RED, HOT], pulse);
+    centered_colored(buf, area, y, "M O V A", &[DEEP, COOL, GLARE, PALE], pulse);
     center(
         buf,
         area,
@@ -329,7 +347,7 @@ fn menu(buf: &mut Buffer, area: Rect, game: &Game) {
     // Rank, plus how far into the current band the lifetime score has climbed.
     s.clear();
     let _ = write!(s, "RANK  {}", save::rank_name(game.save.total_score));
-    center(buf, area, y + 6, &s, Style::new().fg(PURPLE).bg(BG));
+    center(buf, area, y + 6, &s, Style::new().fg(COOL).bg(BG));
     rank_bar(buf, area, y + 7, game.save.total_score);
 
     // Lifetime progress. This shares no row with the tagline below it: `center`
@@ -369,9 +387,9 @@ fn rank_bar(buf: &mut Buffer, area: Rect, y: i32, total: u32) {
         let on = t * w as f32 >= (i + 1) as f32;
         let col = if on {
             if full {
-                HOT
+                GLARE
             } else {
-                PURPLE
+                COOL
             }
         } else {
             Color::Rgb(44, 22, 60)
@@ -393,14 +411,14 @@ pub fn goals(buf: &mut Buffer, area: Rect, game: &Game) {
     let c = cam(inner, 0.0, 0.0);
     grid(buf, inner, &c, false);
     for s in &game.solids.solids {
-        draw_solid(buf, inner, &c, s, false);
+        draw_solid(buf, inner, &c, &game.solids, s, false);
     }
 
     let half = goal::COUNT.div_ceil(2) as i32;
     let rows = 8i32 + half;
     let y = area.y as i32 + (area.height as i32 - rows) / 2;
 
-    centered_colored(buf, area, y, "G O A L S", &[DEEP, PURPLE, RED], 0.2);
+    centered_colored(buf, area, y, "G O A L S", &[DEEP, COOL, GLARE], 0.2);
     center(
         buf,
         area,
@@ -443,7 +461,7 @@ pub fn goals(buf: &mut Buffer, area: Rect, game: &Game) {
             ry,
             '▪',
             Style::new()
-                .fg(if got { PURPLE } else { Color::Rgb(48, 26, 52) })
+                .fg(if got { COOL } else { Color::Rgb(48, 26, 52) })
                 .bg(BG),
         );
         line(
@@ -468,7 +486,7 @@ pub fn goals(buf: &mut Buffer, area: Rect, game: &Game) {
         charted,
         region::COUNT
     );
-    center(buf, area, y + rows - 2, &s, Style::new().fg(PURPLE).bg(BG));
+    center(buf, area, y + rows - 2, &s, Style::new().fg(COOL).bg(BG));
     center(
         buf,
         area,
@@ -491,7 +509,7 @@ fn centered_colored(buf: &mut Buffer, area: Rect, y: i32, s: &str, ramp: &[Color
             x + i as i32,
             y,
             *ch,
-            Style::new().fg(mix(base, HOT, pulse * 0.35)).bg(BG),
+            Style::new().fg(mix(base, GLARE, pulse * 0.35)).bg(BG),
         );
     }
 }
@@ -511,7 +529,7 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
     let c = cam(inner, 0.0, 0.0);
     grid(buf, inner, &c, false);
     for s in &game.solids.solids {
-        draw_solid(buf, inner, &c, s, false);
+        draw_solid(buf, inner, &c, &game.solids, s, false);
     }
 
     let st = &game.stats;
@@ -523,13 +541,14 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
     let rows = 14i32 + if gained.is_empty() { 0 } else { 2 };
     let y = area.y as i32 + (area.height as i32 - rows) / 2;
 
-    centered_colored(buf, area, y, "M O V A", &[DEEP, PURPLE, RED, DIM_RED], 0.2);
+    // Cooling down. The name is still his name; the run is over.
+    centered_colored(buf, area, y, "M O V A", &[DEEP, COOL, DIM_RED, RED], 0.2);
     center(buf, area, y + 2, "RUN ENDED", Style::new().fg(FAINT).bg(BG));
 
     let mut s = String::with_capacity(32);
     s.clear();
     let _ = write!(s, "SCORE  {}", game.score.points);
-    let score_col = if game.new_high { HOT } else { PALE };
+    let score_col = if game.new_high { GLARE } else { PALE };
     center(buf, area, y + 4, &s, Style::new().fg(score_col).bg(BG));
 
     s.clear();
@@ -560,12 +579,18 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
         st.best_combo,
         (st.peak_speed * 100.0) as u32
     );
-    center(buf, area, y + 8, &s, Style::new().fg(PURPLE).bg(BG));
+    center(buf, area, y + 8, &s, Style::new().fg(COOL).bg(BG));
 
     // Anything this run unlocked, called out before the standing records.
     let mut row = 10i32;
     if !gained.is_empty() {
-        center(buf, area, y + row, "UNLOCKED", Style::new().fg(HOT).bg(BG));
+        center(
+            buf,
+            area,
+            y + row,
+            "UNLOCKED",
+            Style::new().fg(GLARE).bg(BG),
+        );
         for (n, label) in gained.iter().enumerate() {
             let mut t = String::with_capacity(20);
             let _ = write!(t, "▪ {label}");
@@ -583,7 +608,7 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
     s.clear();
     if game.new_high {
         let _ = write!(s, "NEW HIGH  {:06}", game.save.high);
-        center(buf, area, y + row, &s, Style::new().fg(HOT).bg(BG));
+        center(buf, area, y + row, &s, Style::new().fg(GLARE).bg(BG));
     } else {
         let _ = write!(s, "HIGH  {:06}", game.save.high);
         center(buf, area, y + row, &s, Style::new().fg(FAINT).bg(BG));
@@ -598,7 +623,7 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
         goal::COUNT,
         game.save.runs
     );
-    center(buf, area, y + row + 1, &s, Style::new().fg(PURPLE).bg(BG));
+    center(buf, area, y + row + 1, &s, Style::new().fg(COOL).bg(BG));
 
     center(
         buf,
@@ -622,12 +647,11 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
     }
 
     grid(buf, inner, &c, true);
-    arena_edge(buf, inner, &c);
 
     // Pillars before anything alive, so bodies and bullets always read on top
     // of the map rather than behind it.
     for s in &game.solids.solids {
-        draw_solid(buf, inner, &c, s, true);
+        draw_solid(buf, inner, &c, &game.solids, s, true);
     }
 
     for p in &game.fx.parts {
@@ -635,13 +659,21 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
         let a = (p.life / p.max_life).clamp(0.0, 1.0);
         let (ch, col) = match p.kind {
             0 => (DUST, mix(RED, DIM_RED, 1.0 - a)),
-            1 => (DUST, mix(PURPLE, DEEP, 1.0 - a)),
+            1 => (DUST, mix(COOL, DEEP, 1.0 - a)),
             2 => (DUST, mix(HOT, DIM_RED, 1.0 - a)),
-            // Embers cool, so the ramp runs the other way from the debris above: born
-            // white-hot, dying red. A trail that dims as it ages is a spark; one that
-            // heats up is a flame. `mix` clamps, so the tail past `a = 0.6` is plain
-            // hot red and the last of the life is spent in it.
-            _ => (FLAME, mix(mix(RED, HOT, a), PALE, (a - 0.6).max(0.0) / 0.4)),
+            // Embers cool, so the ramp runs the other way from the debris above:
+            // born white, dying to MOVA's own deep blue. A trail that dims as it
+            // ages is a spark; one that cools reads as fire, because fire is the
+            // thing that cools. `mix` clamps, so the head past `a = 0.6` is plain
+            // glare and the first of the life is spent in it.
+            //
+            // This is the single most important colour decision in the game. It
+            // was red, which made the trail the same colour as the thing chasing
+            // MOVA — and the trail is longer than the enemy.
+            _ => (
+                FLAME,
+                mix(mix(DEEP, GLARE, a), PALE, (a - 0.6).max(0.0) / 0.4),
+            ),
         };
         putf(buf, inner, sx, sy, ch, Style::new().fg(col).bg(BG));
     }
@@ -655,7 +687,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             sx,
             sy,
             BULLET,
-            Style::new().fg(mix(PURPLE, DEEP, 1.0 - a)).bg(BG),
+            Style::new().fg(mix(COOL, DEEP, 1.0 - a)).bg(BG),
         );
     }
 
@@ -705,7 +737,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             inner,
             mid,
             &s,
-            Style::new().fg(mix(DEEP, HOT, a)).bg(BG),
+            Style::new().fg(mix(DEEP, GLARE, a)).bg(BG),
         );
     } else if game.banner_t > 0.0 {
         let a = (game.banner_t / 1.8).clamp(0.0, 1.0);
@@ -717,7 +749,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             inner,
             mid,
             &s,
-            Style::new().fg(mix(DEEP, PURPLE, a)).bg(BG),
+            Style::new().fg(mix(DEEP, COOL, a)).bg(BG),
         );
     }
 
@@ -736,7 +768,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             inner,
             y,
             msg,
-            Style::new().fg(mix(DEEP, PURPLE, a)).bg(BG),
+            Style::new().fg(mix(DEEP, COOL, a)).bg(BG),
         );
     }
 
@@ -753,7 +785,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             inner,
             y,
             &s,
-            Style::new().fg(mix(HOT, PURPLE, 1.0 - a)).bg(BG),
+            Style::new().fg(mix(GLARE, COOL, 1.0 - a)).bg(BG),
         );
     }
 
@@ -883,6 +915,12 @@ fn radar(buf: &mut Buffer, area: Rect, game: &Game) {
     // Radar cells per world unit, and the inverse for culling.
     let k = r as f32 / RADAR_RANGE;
     let st = Style::new().fg(BLOCK_NEAR).bg(BG);
+    // Every offset below is taken the short way round the seam. The arena wraps,
+    // so a pillar a unit to MOVA's left can be a large positive coordinate, and
+    // measuring it raw would drop it out of range and leave the radar with a
+    // hole in it that opens as MOVA crosses and never closes.
+    let (hx, hy) = (ARENA_HX, ARENA_HY);
+    let off = |x: f32, y: f32| (Arena::delta_axis(px, x, hx), Arena::delta_axis(py, y, hy));
 
     for dy in -r..=r {
         for dx in -r..=r {
@@ -900,17 +938,17 @@ fn radar(buf: &mut Buffer, area: Rect, game: &Game) {
     }
 
     // Pillars. The corners are rounded rather than floored so the cell span
-    // follows the block's true width: eight units is exactly two cells at this
-    // scale, so a block is two cells wide and the lane beside it is one, at
-    // every position rather than at the lucky ones.
+    // follows the block's true width, so the lane beside a block is as wide as
+    // it is, at every position rather than at the lucky ones.
     for s in &game.solids.solids {
-        if (s.x - px).abs() > RADAR_RANGE + s.hw || (s.y - py).abs() > RADAR_RANGE + s.hh {
+        let (ox, oy) = off(s.x, s.y);
+        if ox.abs() > RADAR_RANGE + s.hw || oy.abs() > RADAR_RANGE + s.hh {
             continue;
         }
-        let x0 = ((s.x - s.hw - px) * k).round() as i32;
-        let x1 = ((s.x + s.hw - px) * k).round() as i32;
-        let y0 = ((s.y - s.hh - py) * k).round() as i32;
-        let y1 = ((s.y + s.hh - py) * k).round() as i32;
+        let x0 = ((ox - s.hw) * k).round() as i32;
+        let x1 = ((ox + s.hw) * k).round() as i32;
+        let y0 = ((oy - s.hh) * k).round() as i32;
+        let y1 = ((oy + s.hh) * k).round() as i32;
         for j in y0..y1 {
             for i in x0..x1 {
                 if i * i + j * j <= r2 {
@@ -924,16 +962,14 @@ fn radar(buf: &mut Buffer, area: Rect, game: &Game) {
     // arena, and pinning every distant one to the rim would leave a permanent
     // ring of blips that says nothing.
     for p in &game.pickups {
-        let (dx, dy) = (
-            ((p.x - px) * k).round() as i32,
-            ((p.y - py) * k).round() as i32,
-        );
-        if (p.x - px).hypot(p.y - py) > RADAR_RANGE || dx * dx + dy * dy > r2 {
+        let (ox, oy) = off(p.x, p.y);
+        let (dx, dy) = ((ox * k).round() as i32, (oy * k).round() as i32);
+        if ox.hypot(oy) > RADAR_RANGE || dx * dx + dy * dy > r2 {
             continue;
         }
         let col = match p.kind {
-            crate::pickup::Kind::Core => PURPLE,
-            crate::pickup::Kind::Surge => HOT,
+            crate::pickup::Kind::Core => COOL,
+            crate::pickup::Kind::Surge => GLARE,
             crate::pickup::Kind::Heal => PALE,
         };
         putc(
@@ -951,12 +987,13 @@ fn radar(buf: &mut Buffer, area: Rect, game: &Game) {
     // see anyway. Only out to the bearing range, so the ring stays a set of
     // directions rather than a solid band.
     for e in &game.enemies {
-        let Some((dx, dy)) = radar_blip(e.x, e.y, px, py, k, r) else {
+        let (ex, ey) = off(e.x, e.y);
+        let Some((dx, dy)) = radar_blip(ex, ey, k, r) else {
             continue;
         };
         // Same rule the body on screen uses, so the radar and the arena never
         // disagree about what is urgent.
-        let near = (e.x - px).powi(2) + (e.y - py).powi(2) < 49.0;
+        let near = ex * ex + ey * ey < 49.0;
         let col = if e.hit > 0.0 || near { HOT } else { RED };
         putc(
             buf,
@@ -972,10 +1009,11 @@ fn radar(buf: &mut Buffer, area: Rect, game: &Game) {
 }
 
 /// Radar cell for a contact, or `None` if it is too far out to be worth a
-/// blip. Anything past the ring is pulled back onto it, so the rim reads as a
-/// bearing rather than as a wall.
-fn radar_blip(x: f32, y: f32, px: f32, py: f32, k: f32, r: i32) -> Option<(i32, i32)> {
-    let (dx, dy) = ((x - px) * k, (y - py) * k);
+/// blip. `ox, oy` are already measured the short way round the seam. Anything
+/// past the ring is pulled back onto it, so the rim reads as a bearing rather
+/// than as a wall.
+fn radar_blip(ox: f32, oy: f32, k: f32, r: i32) -> Option<(i32, i32)> {
+    let (dx, dy) = (ox * k, oy * k);
     let d = (dx * dx + dy * dy).sqrt();
     if d > RADAR_BEARING * k {
         return None;
@@ -993,7 +1031,7 @@ fn radar_blip(x: f32, y: f32, px: f32, py: f32, k: f32, r: i32) -> Option<(i32, 
 /// A pillar as a solid block with a lit top edge. Drawing the top row brighter
 /// is what makes it read as something with height rather than a hole in the
 /// floor, and it costs one extra pass over the same cells.
-fn draw_solid(buf: &mut Buffer, area: Rect, c: &Cam, s: &Solid, lit: bool) {
+fn draw_solid(buf: &mut Buffer, area: Rect, c: &Cam, g: &SolidGrid, s: &Solid, lit: bool) {
     // `y - hh` is the far edge, which projects to the smaller screen row. The
     // corners must be taken in that order or the vertical span comes out
     // inverted and every block collapses to a single line.
@@ -1022,13 +1060,28 @@ fn draw_solid(buf: &mut Buffer, area: Rect, c: &Cam, s: &Solid, lit: bool) {
     // sells the height, and it costs a single extra pass over the same cells.
     let top = mix(face, BLOCK_TOP, if lit { 0.85 } else { 0.4 });
 
+    // Whether the far edge is an edge at all. A solid is larger than the lattice
+    // cell it is indexed by, and walls fuse with their neighbours on all eight
+    // sides, so a run of them is one mass — and a lit line drawn along the top of
+    // every block in it slices that mass into separate slabs, each one pretending
+    // to be a free-standing wall with floor behind it. v2 drew the line
+    // unconditionally and a map full of it read as loose bricks, not architecture.
+    //
+    // So it is drawn only where there is floor behind. The cell is recovered from
+    // the block's own centre rather than carried on the block: `buckets` is keyed
+    // by cell, so a block's index into `solids` is not its cell.
+    let (ci, cj) = ((s.x / CELL).round() as i32, (s.y / CELL).round() as i32);
+    let open_behind = g.cell_kind(ci, cj - 1) == EMPTY;
+
     for y in ty..=by {
         for x in lx..=rx {
             putc(buf, area, x, y, '█', Style::new().fg(face).bg(face));
         }
     }
-    for x in lx..=rx {
-        putc(buf, area, x, ty, '█', Style::new().fg(top).bg(face));
+    if open_behind {
+        for x in lx..=rx {
+            putc(buf, area, x, ty, '█', Style::new().fg(top).bg(face));
+        }
     }
 }
 
@@ -1044,8 +1097,8 @@ fn draw_pickup(buf: &mut Buffer, area: Rect, c: &Cam, p: &Pickup) {
         return;
     }
     let col = match p.kind {
-        crate::pickup::Kind::Core => PURPLE,
-        crate::pickup::Kind::Surge => HOT,
+        crate::pickup::Kind::Core => COOL,
+        crate::pickup::Kind::Surge => GLARE,
         crate::pickup::Kind::Heal => PALE,
     };
     // Fades up over half a second so a refill is visible as it happens.
@@ -1075,7 +1128,7 @@ fn draw_pickup(buf: &mut Buffer, area: Rect, c: &Cam, p: &Pickup) {
 fn draw_ring(buf: &mut Buffer, area: Rect, c: &Cam, r: &crate::score::Ring) {
     let (rad, fade) = r.extent();
     let steps = (rad * 2.4).ceil().max(8.0) as i32;
-    let col = mix(BG, HOT, fade * 0.5);
+    let col = mix(BG, if r.mine { GLARE } else { HOT }, fade * 0.5);
     let st = Style::new().fg(col).bg(BG);
     for i in 0..steps {
         let a = i as f32 / steps as f32 * std::f32::consts::TAU;
@@ -1125,12 +1178,15 @@ fn draw_player(buf: &mut Buffer, area: Rect, c: &Cam, p: &Player) {
     // wide enough to straddle a cell boundary comes apart into two or three as
     // it moves, which reads as a second MOVA dragging along behind. Speed is
     // sold by the colour, the embers and the wake instead.
+    // His own blue, brightening with speed, white once he is gone. Dashing reads
+    // as a white streak because at a hundred and ninety units a second he *is*
+    // one, and a dimmer glyph at that speed is a glyph you cannot follow.
     let col = if p.dashing() {
         PALE
     } else if p.blazing() {
-        HOT
+        GLARE
     } else {
-        mix(RED, HOT, 0.2 + p.speed_ratio() * 0.7)
+        mix(DEEP, GLARE, 0.25 + p.speed_ratio() * 0.75)
     };
     putf(buf, area, sx, sy, PLAYER, Style::new().fg(col).bg(BG));
 }
@@ -1145,15 +1201,15 @@ fn draw_pop(buf: &mut Buffer, area: Rect, c: &Cam, p: &crate::score::Pop) {
     let base = match p.kind {
         PopKind::Ram => {
             s.push_str("RAM+");
-            HOT
+            GLARE
         }
         PopKind::Fast => {
             s.push_str("FAST+");
-            HOT
+            GLARE
         }
         PopKind::Near => {
             s.push_str("NEAR+");
-            PURPLE
+            COOL
         }
         PopKind::Kill => {
             s.push('+');
@@ -1163,11 +1219,11 @@ fn draw_pop(buf: &mut Buffer, area: Rect, c: &Cam, p: &crate::score::Pop) {
         // so the prefix would be a lie; just the payout.
         PopKind::Core => {
             s.push_str("CORE+");
-            PURPLE
+            COOL
         }
         PopKind::Surge => {
             s.push_str("SURGE+");
-            HOT
+            GLARE
         }
         PopKind::Heal => {
             s.push_str("FIX+");
@@ -1175,7 +1231,7 @@ fn draw_pop(buf: &mut Buffer, area: Rect, c: &Cam, p: &crate::score::Pop) {
         }
         PopKind::Found => {
             s.push_str("NEW+");
-            HOT
+            GLARE
         }
     };
     let _ = write!(s, "{}", p.value);
@@ -1201,8 +1257,8 @@ fn draw_note(buf: &mut Buffer, area: Rect, c: &Cam, n: &crate::score::Note) {
     let a = (n.life / 1.5).clamp(0.0, 1.0);
     let col = match n.kind {
         PopKind::Heal => PALE,
-        PopKind::Found => HOT,
-        _ => PURPLE,
+        PopKind::Found => GLARE,
+        _ => COOL,
     };
     let w = n.text.chars().count() as i32;
     let x = sx.round() as i32 - w / 2;
@@ -1243,36 +1299,13 @@ fn grid(buf: &mut Buffer, area: Rect, c: &Cam, lit: bool) {
             } else {
                 mix(GRID_NEAR, GRID_FAR, depth(c, sy))
             };
-            // The arena floor is lit; the space around it recedes.
-            let col = if lit && wx.abs() <= ARENA_HX && wy.abs() <= ARENA_HY {
-                col
-            } else {
-                dim(col)
-            };
+            // On a torus there is no outside, so the floor is lit everywhere.
+            // The check that used to be here asked whether the point fell inside
+            // the arena rectangle, and every point does.
+            let col = if lit { col } else { dim(col) };
             putf(buf, area, sx, sy, GRID, Style::new().fg(col).bg(BG));
         }
     }
-}
-
-fn arena_edge(buf: &mut Buffer, area: Rect, c: &Cam) {
-    let (x0, y0) = proj(c, -ARENA_HX, -ARENA_HY);
-    let (x1, y1) = proj(c, ARENA_HX, ARENA_HY);
-    let st = Style::new().fg(EDGE).bg(BG);
-    let (lx, rx) = (x0.round() as i32, x1.round() as i32);
-    let (ty, by) = (y0.round() as i32, y1.round() as i32);
-
-    for x in lx..=rx {
-        putc(buf, area, x, ty, '─', st);
-        putc(buf, area, x, by, '─', st);
-    }
-    for y in ty..=by {
-        putc(buf, area, lx, y, '│', st);
-        putc(buf, area, rx, y, '│', st);
-    }
-    putc(buf, area, lx, ty, '┌', st);
-    putc(buf, area, rx, ty, '┐', st);
-    putc(buf, area, lx, by, '└', st);
-    putc(buf, area, rx, by, '┘', st);
 }
 
 // ---- hud ------------------------------------------------------------------
@@ -1292,7 +1325,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
     let right = area.right() as i32 - 2;
 
     // --- top row
-    line(buf, area, left, top, "MOVA", Style::new().fg(PURPLE).bg(BG));
+    line(buf, area, left, top, "MOVA", Style::new().fg(COOL).bg(BG));
     gap(buf, area, left + 4, top, 1);
     for i in 0..game.player.max_hp {
         let on = i < game.player.hp;
@@ -1340,11 +1373,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
             top,
             name,
             Style::new()
-                .fg(if fresh {
-                    PURPLE
-                } else {
-                    Color::Rgb(120, 52, 90)
-                })
+                .fg(if fresh { COOL } else { Color::Rgb(38, 54, 104) })
                 .bg(BG),
         );
     } else if x + 2 + rank_w <= room {
@@ -1382,7 +1411,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
     s.clear();
     let _ = write!(s, "SPD {:03}", (ratio * 100.0) as u32);
     let spd_len = s.chars().count() as i32;
-    let spd_col = if blazing || armed { HOT } else { PALE };
+    let spd_col = if blazing || armed { GLARE } else { PALE };
     line(buf, area, left, bot, &s, Style::new().fg(spd_col).bg(BG));
 
     // The bar is the first thing to go when the window is too narrow to hold
@@ -1396,7 +1425,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
                 if blazing {
                     PALE
                 } else {
-                    mix(RED, HOT, ratio)
+                    mix(DEEP, GLARE, ratio)
                 }
             } else {
                 Color::Rgb(44, 22, 60)
@@ -1419,7 +1448,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
             rx,
             bot - 1,
             if armed { '┃' } else { '┆' },
-            Style::new().fg(if armed { HOT } else { DEEP }).bg(BG),
+            Style::new().fg(if armed { GLARE } else { DEEP }).bg(BG),
         );
         gap(buf, area, bx + 8, bot, 1);
     }
@@ -1427,9 +1456,9 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
     let combo_col = if sc.combo == 0 {
         FAINT
     } else if sc.charge() > 0.4 {
-        HOT
+        GLARE
     } else {
-        RED
+        DIM_RED
     };
     s.clear();
     let _ = write!(s, "COMBO x{}", sc.combo);
@@ -1446,10 +1475,10 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
     s.clear();
     let dash = if p.dashing() {
         s.push_str("DASH");
-        HOT
+        GLARE
     } else if p.dash_ready() {
         s.push_str("DASH READY");
-        PURPLE
+        COOL
     } else {
         let _ = write!(s, "DASH {:.1}", p.dash_cd / DASH_CD);
         DIM_RED
@@ -1481,7 +1510,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
                 y,
                 &s,
                 Style::new()
-                    .fg(mix(HOT, PURPLE, 1.0 - p.surge / Player::SURGE_TIME))
+                    .fg(mix(GLARE, COOL, 1.0 - p.surge / Player::SURGE_TIME))
                     .bg(BG),
             );
         }

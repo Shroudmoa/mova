@@ -125,7 +125,9 @@ pub struct Particle {
     pub life: f32,
     pub max_life: f32,
     /// 0 = kill debris, 1 = dash trail, 2 = spark from taking a hit,
-    /// 3 = ember off a MOVA at full speed.
+    /// 3 = ember off a MOVA at full speed. [`EMBER`] is that last one; the
+    /// others have no names because nothing outside this module branches on
+    /// them — the renderer maps all three through one arm of a match.
     pub kind: u8,
 }
 
@@ -147,6 +149,12 @@ pub struct Ring {
     pub max_life: f32,
     /// Radius in world units at the moment it dies.
     pub r: f32,
+    /// Whose shockwave this is. MOVA's rings are drawn in his colour and his
+    /// victims' in theirs, because a ring is the widest thing on screen when it
+    /// is at its best and it is almost always within a body's width of the thing
+    /// that made it. One colour for both meant the single clearest read on the
+    /// arena — something just went off *here* — was ambiguous.
+    pub mine: bool,
 }
 
 impl Ring {
@@ -157,6 +165,21 @@ impl Ring {
         (self.r * t, 1.0 - t)
     }
 }
+
+/// How long an ember lives, in seconds.
+///
+/// A constant rather than an argument because it is half of what decides how long
+/// the flame tail is — the tail is a distance, and distance is speed times
+/// lifetime. [`crate::player::Player::EMBER_GAP`] is the other half, and together
+/// the two set how many embers are alive at any speed.
+pub const EMBER_LIFE: f32 = 0.30;
+
+/// Particle kind for an ember off MOVA's trail.
+///
+/// Named because two modules outside the renderer now branch on it: the renderer
+/// picks the cooling ramp with it, and the wake in `Game` cuts with it. A literal
+/// three in two places is a number that can be renumbered in one of them.
+pub const EMBER: u8 = 3;
 
 /// Pre-sized so a normal run never allocates here.
 pub struct Fx {
@@ -194,8 +217,9 @@ impl Fx {
     }
 
     /// Spawns a shockwave. `big` is for rams and anything else that should
-    /// visibly shove the world around.
-    pub fn ring(&mut self, x: f32, y: f32, big: bool) {
+    /// visibly shove the world around. `mine` is who set it off, and only
+    /// decides the colour — see [`Ring::mine`].
+    pub fn ring(&mut self, x: f32, y: f32, big: bool, mine: bool) {
         if self.rings.len() >= 12 {
             return;
         }
@@ -206,6 +230,7 @@ impl Fx {
             life,
             max_life: life,
             r: if big { 16.0 } else { 8.0 },
+            mine,
         });
     }
 
@@ -232,7 +257,7 @@ impl Fx {
     /// be going the same way.
     #[inline]
     pub fn ember(&mut self, x: f32, y: f32, vx: f32, vy: f32) {
-        self.particle(x, y, vx, vy, 0.30, 3);
+        self.particle(x, y, vx, vy, EMBER_LIFE, EMBER);
     }
 
     #[inline]

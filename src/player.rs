@@ -5,24 +5,48 @@ use crate::input::Input;
 use crate::score::Fx;
 use crate::solid::SolidGrid;
 
-pub const ACCEL: f32 = 300.0;
-/// Per-second velocity bleed. Low enough that speed is worth chasing.
-pub const DRAG: f32 = 3.6;
-pub const MAX_SPEED: f32 = 26.0;
+pub const ACCEL: f32 = 320.0;
+/// Per-second velocity bleed.
+///
+/// v3 cut this from 3.6 to 0.5, and that one number is most of what changed
+/// about how the game plays. Speed used to leak away faster than most players
+/// could replace it, so the cap was a thing you arrived at rather than a thing
+/// you held, and every corner cost you the run you had built. Now it leaks
+/// slowly enough that speed is a resource: you spend it on direction changes,
+/// and going straight is how you keep it.
+pub const DRAG: f32 = 0.5;
+/// The ceiling. Higher than v2's 26 because the drag no longer decides how fast
+/// you can go — this does, and a cap you can actually reach in a couple of
+/// seconds is the difference between chasing it and waiting for it.
+pub const MAX_SPEED: f32 = 44.0;
 pub const RADIUS: f32 = 1.0;
 
-pub const DASH_SPEED: f32 = 118.0;
-pub const DASH_TIME: f32 = 0.15;
-pub const DASH_CD: f32 = 0.70;
+pub const DASH_SPEED: f32 = 190.0;
+pub const DASH_TIME: f32 = 0.16;
+pub const DASH_CD: f32 = 0.52;
 /// Grace period after a dash during which nothing can touch MOVA.
 pub const DASH_IFRAMES: f32 = 0.06;
 /// Invulnerability after eating a hit.
-pub const HIT_IFRAMES: f32 = 1.1;
+pub const HIT_IFRAMES: f32 = 1.0;
 
-/// A ram leaves MOVA over the normal cap for a moment, which is what makes a
-/// chain of them feel like one continuous shove instead of three separate hits.
-pub const BOOST_TIME: f32 = 0.42;
-pub const BOOST_CAP: f32 = 1.34;
+/// A bounce leaves MOVA over the normal cap for a moment, which is what makes a
+/// chain of them feel like one continuous shove instead of separate hits.
+pub const BOOST_TIME: f32 = 0.55;
+pub const BOOST_CAP: f32 = 1.28;
+
+/// What a bounce off a wall keeps of the speed you came in with. Below one, so
+/// geometry costs you a little; the bounce itself is the reward, not the
+/// preservation.
+const RICOCHET_KEEP: f32 = 0.97;
+/// And what it adds on top. A wall you bounce off clean should feel like it
+/// gave you something.
+const RICOCHET_GAIN: f32 = 1.06;
+
+/// How long a bounce keeps asking the world for a nova. A single step's worth and
+/// no more: the game layer consumes it as an event rather than as a state, so two
+/// bounces inside one step are one nova — which is the right answer, since there
+/// was one reflection.
+const BOUNCE_SIGNAL: f32 = 1.0 / 120.0;
 
 pub struct Player {
     pub x: f32,
@@ -39,6 +63,11 @@ pub struct Player {
     pub invuln: f32,
     /// Counts down after a ram, holding the speed cap open above normal.
     pub boost: f32,
+    /// Set for one step by a reflection, and consumed by the game layer as a
+    /// nova. Not a countdown in the usual sense — it is an event flag, and the
+    /// only reason it is a field rather than a return value is that the bounce
+    /// happens a layer below the one that owns the enemies it is about to hit.
+    pub bounce_t: f32,
     /// Counts down after taking a hit; drives the red flash.
     pub flash: f32,
     /// Counts down while a Surge pickup is live. It is the one thing in the
@@ -73,6 +102,7 @@ impl Player {
             dash_dy: 1.0,
             invuln: 0.0,
             boost: 0.0,
+            bounce_t: 0.0,
             flash: 0.0,
             surge: 0.0,
             alive: true,
@@ -80,12 +110,14 @@ impl Player {
         }
     }
 
-    /// Seconds a Surge pickup lasts, and how much extra headroom it buys.
-    pub const SURGE_TIME: f32 = 7.0;
-    pub const SURGE_CAP: f32 = 1.32;
-    /// Drag is scaled by this while surging. Reducing it, not the acceleration,
-    /// is what makes the top speed something you can actually hold.
-    const SURGE_DRAG: f32 = 0.42;
+    /// Seconds a Surge pickup lasts, and how much extra headroom it buys. With
+    /// the drag already low, the extra cap is what a surge is for — the ceiling
+    /// moves, not the handling.
+    pub const SURGE_TIME: f32 = 8.0;
+    pub const SURGE_CAP: f32 = 1.45;
+    /// Drag is scaled by this while surging, so a surge run holds its line
+    /// rather than merely reaching a higher number once.
+    const SURGE_DRAG: f32 = 0.25;
     /// How close to the cap counts as full speed. A hair under, so holding a
     /// direction at the cap counts rather than flickering on float noise.
     pub const BLAZE_EPS: f32 = 0.05;
@@ -156,6 +188,9 @@ impl Player {
         fx: &mut Fx,
     ) {
         self.dash_cd = (self.dash_cd - dt).max(0.0);
+        // Decayed before the move, so a bounce raised later this step survives to
+        // be seen and one raised last step does not.
+        self.bounce_t = (self.bounce_t - dt).max(0.0);
         self.invuln = (self.invuln - dt).max(0.0);
         self.flash = (self.flash - dt).max(0.0);
         self.boost = (self.boost - dt).max(0.0);
@@ -219,25 +254,58 @@ impl Player {
             }
         }
 
+        let (ox, oy) = (self.x, self.y);
         let (dx, dy) = (self.vx * dt, self.vy * dt);
         self.x += dx;
         self.y += dy;
-        arena.clamp(&mut self.x, &mut self.y);
+        // No wall. The arena wraps, so leaving one side is arriving on the other
+        // and nothing about it needs resolving.
+        (self.x, self.y) = arena.wrap(self.x, self.y);
 
-        // A pillar eats momentum instead of stopping it dead. Killing the dash
-        // outright would feel like a bug on a corridor run; bleeding the speed
-        // means a pillar is a place you slow down, not a wall you bounce off.
-        if solids.push_out(&mut self.x, &mut self.y, RADIUS).is_some() {
-            self.vx *= 0.62;
-            self.vy *= 0.62;
-            self.dash_t = 0.0;
+        // A wall bounces. v2 bled the speed and called that a pillar; here the
+        // surface gives the speed straight back, which turns the furniture from
+        // something that punishes you for running into it into the main way to
+        // change direction without losing your run. Reflecting off the normal
+        // means a glancing hit barely turns you and a square one flips you,
+        // which is the whole skill of threading a corridor at speed.
+        if let Some((nx, ny)) = solids.push_out(&mut self.x, &mut self.y, RADIUS) {
+            let d = self.vx * nx + self.vy * ny;
+            if d < 0.0 {
+                // Only the into-the-wall component is reflected and rescaled; the
+                // along-wall component is untouched, so a bounce skims.
+                self.vx -= 2.0 * d * nx;
+                self.vy -= 2.0 * d * ny;
+                let s = self.speed();
+                if s > 0.001 {
+                    let k = (s * RICOCHET_KEEP * RICOCHET_GAIN).min(self.cap());
+                    self.vx = self.vx / s * k;
+                    self.vy = self.vy / s * k;
+                }
+                self.boost = self.boost.max(BOOST_TIME);
+                self.bounce_t = BOUNCE_SIGNAL;
+                // A bounce does not cancel a dash — you committed to the line,
+                // and coming off the wall at dash speed is the point.
+            }
+            fx.burst(self.x, self.y, 6.0);
         }
 
         // Moving fast leaves a faint wake even without dashing.
         if self.speed_ratio() > 0.78 {
             fx.particle(self.x, self.y, -self.vx * 0.12, -self.vy * 0.12, 0.14, 1);
         }
-        self.burn(fx, (dx * dx + dy * dy).sqrt());
+        // Ground actually covered, measured from where the step started rather
+        // than from how far the velocity said to go.
+        //
+        // v2 passed `|v| * dt` straight through, which counts ground MOVA never
+        // reaches whenever something stops him: pinned against a wall at the cap
+        // he covers none at all but was handed the full step every frame, so he
+        // stood in one spot throwing an unbounded tail of flames. Measuring the
+        // move that happened also makes a bounce count for the ground it ate
+        // rather than the ground he meant to cross, which is what a trail is.
+        let moved = (Arena::delta_axis(ox, self.x, arena.hx).powi(2)
+            + Arena::delta_axis(oy, self.y, arena.hy).powi(2))
+        .sqrt();
+        self.burn(fx, moved);
     }
 
     /// Throws embers while MOVA is at the cap. This is the visible half of
@@ -301,12 +369,14 @@ impl Player {
         self.surge = Self::SURGE_TIME;
     }
 
-    /// A ram connects: MOVA keeps the momentum and gains a little more.
+    /// A ram connects: MOVA keeps the momentum and gains a good deal more.
+    /// Generous on purpose — a chain of kills should end faster than it began,
+    /// so the reward for committing is that the run gets easier.
     pub fn kick(&mut self) {
         self.boost = BOOST_TIME;
         let s = self.speed();
         if s > 0.001 {
-            let k = (s * 1.14).min(self.cap());
+            let k = (s * 1.22).min(self.cap());
             self.vx = self.vx / s * k;
             self.vy = self.vy / s * k;
         }
@@ -332,11 +402,14 @@ impl Player {
         // does not, so a ram chain cannot be used to shrug off contact.
         self.boost = 0.0;
 
-        // Shove MOVA clear so the same enemy cannot chain-hit.
+        // Shove MOVA clear so the same enemy cannot chain-hit. Scaled off the cap
+        // rather than written as a number, so it stays a meaningful recovery
+        // when the cap moves.
         let (dx, dy) = (self.x - from_x, self.y - from_y);
         let len = (dx * dx + dy * dy).sqrt().max(0.001);
-        self.vx = dx / len * 34.0;
-        self.vy = dy / len * 34.0;
+        let shove = self.cap() * 0.85;
+        self.vx = dx / len * shove;
+        self.vy = dy / len * shove;
 
         if self.hp == 0 {
             self.alive = false;

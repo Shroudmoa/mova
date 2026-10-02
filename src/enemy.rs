@@ -1,6 +1,7 @@
 //! Enemies. Three shapes, three jobs: close the distance, chase it down, and
 //! refuse to move at all.
 
+use crate::game::Arena;
 use crate::solid::SolidGrid;
 
 pub const RADIUS: f32 = 1.0;
@@ -99,6 +100,12 @@ pub struct Enemy {
     pub hit: f32,
     /// Cleared when MOVA brushes past: stops near-miss points from repeating.
     pub grazed: bool,
+    /// Counts down after MOVA's wake cuts this one. An enemy has to be able to
+    /// be standing in a *different* part of a trail a moment later, so this
+    /// cannot be a latch — but it cannot be nothing either, or a grunt that
+    /// clips the tail on the way past dies in a single frame and the trail reads
+    /// as a beam rather than as a line.
+    pub wake_cd: f32,
     pub dead: bool,
 }
 
@@ -119,14 +126,29 @@ impl Enemy {
             rush: 0.0,
             hit: 0.0,
             grazed: false,
+            wake_cd: 0.0,
             dead: false,
         }
     }
 
-    pub fn update(&mut self, dt: f32, px: f32, py: f32, time: f32, solids: &SolidGrid) {
+    pub fn update(
+        &mut self,
+        dt: f32,
+        px: f32,
+        py: f32,
+        time: f32,
+        arena: &Arena,
+        solids: &SolidGrid,
+    ) {
         self.hit = (self.hit - dt).max(0.0);
-        let (dx, dy) = (px - self.x, py - self.y);
-        let len = (dx * dx + dy * dy).sqrt().max(0.0001);
+        // Chased across the seam, so a swarm that has MOVA cornered against the
+        // wrap does not simply give up and walk away from him.
+        let dist = arena.distance(self.x, self.y, px, py).max(0.0001);
+        let (dx, dy) = (
+            Arena::delta_axis(self.x, px, arena.hx),
+            Arena::delta_axis(self.y, py, arena.hy),
+        );
+        let len = dist;
         let mut ux = dx / len;
         let mut uy = dy / len;
         let mut rush = 1.0;
@@ -182,5 +204,6 @@ impl Enemy {
             self.slide = 0.45;
             self.slide_n = n;
         }
+        (self.x, self.y) = arena.wrap(self.x, self.y);
     }
 }
