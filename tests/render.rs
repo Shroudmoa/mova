@@ -8,7 +8,7 @@
 //! Run with `cargo test`.
 
 use mova::enemy::{Enemy, Kind};
-use mova::game::{Game, Phase, ARENA_HX, ARENA_HY};
+use mova::game::{Arena, Game, Phase, ARENA_HX, ARENA_HY};
 use mova::input::Input;
 use mova::renderer;
 use mova::save::Save;
@@ -126,12 +126,17 @@ fn radar_is_centred_and_leaves_the_frame_alone() {
 /// scale factor re-derives it wrongly the moment someone retunes the renderer,
 /// which is the opposite of a regression guard. The offset — one cell in from the
 /// border, then half the play field — is the frame box the renderer draws into.
+///
+/// The offset from the camera is taken with `Arena::delta_axis`, because the
+/// arena is a torus and that is the only distance on it that means anything. In
+/// the middle of the map the two agree, which is why a raw subtraction can look
+/// right for most of a run.
 fn project(w: u16, h: u16, cam: (f32, f32), at: (f32, f32)) -> (f32, f32) {
     let (hx, hy) = renderer::view_half(Rect::new(0, 0, w, h));
     let (kx, ky) = (f32::from(w - 2) / (2.0 * hx), f32::from(h - 2) / (2.0 * hy));
     (
-        1.0 + f32::from(w - 2) / 2.0 + (at.0 - cam.0) * kx,
-        1.0 + f32::from(h - 2) / 2.0 + (at.1 - cam.1) * ky,
+        1.0 + f32::from(w - 2) / 2.0 + Arena::delta_axis(cam.0, at.0, ARENA_HX) * kx,
+        1.0 + f32::from(h - 2) / 2.0 + Arena::delta_axis(cam.1, at.1, ARENA_HY) * ky,
     )
 }
 
@@ -248,6 +253,94 @@ fn a_block_draws_as_exactly_its_own_rectangle() {
              on screen\\n{}",
             dump(&buf)
         );
+    }
+}
+
+/// The seam does not empty the frame.
+///
+/// The arena is a torus, so a pillar a few units to MOVA's left is *stored* most
+/// of a period to the right of him. Subtracted raw, that reads as a period away:
+/// culled, and the play field goes bare — on the side the map is coming back
+/// round on, which is where MOVA is running. Every coordinate the simulation
+/// holds is folded into the fundamental rectangle, and the projection has to fold
+/// before it measures or the renderer is describing a map that does not exist.
+///
+/// The camera is walked right round the torus and every block whose centre lands
+/// on screen is asked whether it was drawn. This held in the middle of the map
+/// and nowhere else, which is what made it read as "leaving the centre makes
+/// everything disappear": on one fixed map at 100x30 the same frame held 927 of
+/// the 1513 block cells it should have at the seam and every one of them 1545 up
+/// to the east of it.
+#[test]
+fn crossing_the_seam_does_not_empty_the_frame() {
+    let (w, h) = (100u16, 30u16);
+    let area = Rect::new(0, 0, w, h);
+    let inner = Rect::new(1, 1, w - 2, h - 2);
+
+    // The corners and both seam lines, because the seam is at +hx on each axis
+    // and the bug is invisible everywhere else. Asymmetric signs on purpose: the
+    // fold is not symmetric-looking to a raw subtraction, so one corner on its own
+    // only catches half of it.
+    let spots = [
+        (0.0, 0.0),
+        (ARENA_HX * 0.5, 0.0),
+        (ARENA_HX - 8.0, 0.0),
+        (-ARENA_HX + 8.0, 0.0),
+        (0.0, ARENA_HY - 8.0),
+        (0.0, -ARENA_HY + 8.0),
+        (ARENA_HX - 8.0, ARENA_HY - 8.0),
+        (-ARENA_HX + 8.0, -ARENA_HY + 8.0),
+    ];
+
+    for seed in [0x5EED_1234u32, 0x4D4F_5641] {
+        let mut game = Game::new(Save::default());
+        let (hx, hy) = renderer::view_half(area);
+        game.set_view(hx, hy);
+        game.start();
+        game.solids = SolidGrid::new(seed);
+
+        // Furniture only, so nothing else on the frame can stand in for a block
+        // and no banner can be mistaken for one overwriting it.
+        game.enemies.clear();
+        game.pickups.clear();
+        game.bullets.clear();
+        game.fx.clear();
+        game.radar = false;
+        game.banner_t = 0.0;
+        game.sector_t = 0.0;
+        game.hint_t = 0.0;
+
+        for (px, py) in spots {
+            // Both set rather than settled: the camera eases, and an eased camera
+            // would leave the test measuring a view MOVA is not standing in.
+            game.player.x = px;
+            game.player.y = py;
+            game.cam_x = px;
+            game.cam_y = py;
+
+            let buf = frame(w, h, &game);
+            let g = cells(&buf);
+            for s in &game.solids.solids {
+                let (fx, fy) = project(w, h, (px, py), (s.x, s.y));
+                let (sx, sy) = (fx.round() as i32, fy.round() as i32);
+                if sx < i32::from(inner.x)
+                    || sx >= i32::from(inner.right())
+                    || sy < i32::from(inner.y)
+                    || sy >= i32::from(inner.bottom())
+                {
+                    continue;
+                }
+                assert_eq!(
+                    g[sy as usize][sx as usize],
+                    BLOCK,
+                    "seed {seed:#x}, camera at ({px:.1},{py:.1}): the block at \
+                     ({:.1},{:.1}) projects to ({sx},{sy}) and was not drawn\n{}",
+                    s.x,
+                    s.y,
+                    dump(&buf)
+                );
+            }
+        }
     }
 }
 

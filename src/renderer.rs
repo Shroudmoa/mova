@@ -89,7 +89,8 @@ const GRID_STEP: f32 = 4.0;
 const GRID_EVERY: i32 = 5;
 
 struct Cam {
-    /// Screen-space centre.
+    /// Screen-space centre of the view: the column and row the camera's own
+    /// world point lands on.
     cx: f32,
     cy: f32,
     kx: f32,
@@ -98,6 +99,33 @@ struct Cam {
     wx: f32,
     wy: f32,
     half_h: f32,
+}
+
+impl Cam {
+    /// Offset of a world point from the camera, in world units, measured the
+    /// short way round the seam.
+    ///
+    /// This is the whole reason the torus renders at all. Every coordinate the
+    /// simulation holds is folded into the fundamental rectangle, so a pillar a
+    /// unit to MOVA's left is stored at `x = 191` while the camera is at `-192`,
+    /// and subtracting the two naively says the pillar is 383 units away and
+    /// throws it off the screen. The map is still there — it has come back round
+    /// to meet you — but on screen it is gone, and it is gone on the side MOVA is
+    /// running towards, which reads as the world falling away as he crosses.
+    /// Fold first, then subtract.
+    #[inline]
+    fn off(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            Arena::delta_axis(self.wx, x, ARENA_HX),
+            Arena::delta_axis(self.wy, y, ARENA_HY),
+        )
+    }
+
+    /// Screen position of an offset from the camera, in world units.
+    #[inline]
+    fn place(&self, ox: f32, oy: f32) -> (f32, f32) {
+        (self.cx + ox * self.kx, self.cy + oy * self.ky)
+    }
 }
 
 /// How many world units fit across `outer` and up `outer`, accounting for the
@@ -123,8 +151,13 @@ fn cam(area: Rect, wx: f32, wy: f32) -> Cam {
     let h = f32::from(area.height);
     let k = scale(w, h);
     Cam {
-        cx: f32::from(area.x) + w / 2.0 - wx * k,
-        cy: f32::from(area.y) + h / 2.0 - wy * k * DEPTH,
+        // The screen centre, not the camera's own projection of the world
+        // origin. Everything downstream wants one or the other and mixing them
+        // shifts the view by twice the camera's offset — which is a bug that
+        // only shows up away from the middle of the map, because that is the
+        // only place the two numbers differ.
+        cx: f32::from(area.x) + w / 2.0,
+        cy: f32::from(area.y) + h / 2.0,
         kx: k,
         ky: k * DEPTH,
         wx,
@@ -133,9 +166,15 @@ fn cam(area: Rect, wx: f32, wy: f32) -> Cam {
     }
 }
 
+/// A world point to its screen position.
+///
+/// Seam-aware, and every caller goes through it: on a torus there is no such
+/// thing as "off screen", only "on the far side", and a projection that cannot
+/// tell the two apart empties the frame every time MOVA walks past the seam.
 #[inline]
 fn proj(c: &Cam, x: f32, y: f32) -> (f32, f32) {
-    (c.cx + x * c.kx, c.cy + y * c.ky)
+    let (ox, oy) = c.off(x, y);
+    c.place(ox, oy)
 }
 
 /// 0 at the near edge of the view, 1 at the far edge.
@@ -803,8 +842,11 @@ fn threat_tick(buf: &mut Buffer, area: Rect, c: &Cam, game: &Game) {
     let mut best = f32::MAX;
     let mut best_dir = None;
     for e in &game.enemies {
-        let dx = e.x - px;
-        let dy = e.y - py;
+        // The short way round the seam, so the tick points at the thing that is
+        // actually nearest rather than at whichever enemy happens to share an
+        // edge of the fundamental rectangle with MOVA.
+        let dx = Arena::delta_axis(px, e.x, ARENA_HX);
+        let dy = Arena::delta_axis(py, e.y, ARENA_HY);
         let d = dx * dx + dy * dy;
         if d < best {
             best = d;
@@ -812,7 +854,9 @@ fn threat_tick(buf: &mut Buffer, area: Rect, c: &Cam, game: &Game) {
         }
     }
     let Some((dx, dy)) = best_dir else { return };
-    let (sx, sy) = proj(c, px + dx, py + dy);
+    // `dx, dy` are already offsets from MOVA and MOVA is what the camera is on,
+    // so these are offsets from the camera too.
+    let (sx, sy) = c.place(dx, dy);
     if sx >= area.x as f32
         && sx < area.right() as f32
         && sy >= area.y as f32
@@ -1032,11 +1076,19 @@ fn radar_blip(ox: f32, oy: f32, k: f32, r: i32) -> Option<(i32, i32)> {
 /// is what makes it read as something with height rather than a hole in the
 /// floor, and it costs one extra pass over the same cells.
 fn draw_solid(buf: &mut Buffer, area: Rect, c: &Cam, g: &SolidGrid, s: &Solid, lit: bool) {
+    // The block's centre is folded to the camera's side of the seam once, and the
+    // corners are then measured out from it in that already-folded frame. Folding
+    // each corner on its own looks equivalent and is not: a block straddling the
+    // seam has one corner inside the period and the other a period out, so the
+    // two fold to opposite ends of the rectangle and the block is drawn as a
+    // 400-cell band across the whole screen.
+    //
     // `y - hh` is the far edge, which projects to the smaller screen row. The
     // corners must be taken in that order or the vertical span comes out
     // inverted and every block collapses to a single line.
-    let (x0, y0) = proj(c, s.x - s.hw, s.y - s.hh);
-    let (x1, y1) = proj(c, s.x + s.hw, s.y + s.hh);
+    let (ox, oy) = c.off(s.x, s.y);
+    let (x0, y0) = c.place(ox - s.hw, oy - s.hh);
+    let (x1, y1) = c.place(ox + s.hw, oy + s.hh);
     let lx = x0.round() as i32;
     let rx = x1.round() as i32;
     let ty = y0.round() as i32;
@@ -1132,8 +1184,11 @@ fn draw_ring(buf: &mut Buffer, area: Rect, c: &Cam, r: &crate::score::Ring) {
     let st = Style::new().fg(col).bg(BG);
     for i in 0..steps {
         let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-        let (wx, wy) = (r.x + a.cos() * rad, r.y + a.sin() * rad);
-        let (sx, sy) = proj(c, wx, wy);
+        // Sampled around the ring's own centre, which `proj` folds to the camera
+        // first: measuring each sample point off the stored centre instead would
+        // let a ring opened across the seam wrap its points one by one and come
+        // apart into two arcs on opposite edges of the screen.
+        let (sx, sy) = proj(c, r.x + a.cos() * rad, r.y + a.sin() * rad);
         putf(buf, area, sx, sy, '·', st);
     }
 }
@@ -1148,7 +1203,10 @@ fn draw_enemy(buf: &mut Buffer, area: Rect, c: &Cam, e: &Enemy, game: &Game) {
         return;
     }
     let t = depth(c, sy);
-    let d = ((e.x - game.player.x).powi(2) + (e.y - game.player.y).powi(2)).sqrt();
+    // Measured the short way round, for the same reason the projection is: an
+    // enemy pressed up against MOVA across the seam is touching him, and taking
+    // the long way reads it as a whole period away and keeps it the wrong colour.
+    let d = game.arena.distance(e.x, e.y, game.player.x, game.player.y);
     // Depth sets the base tone; closing in, or taking a hit, turns it hot.
     let col = if e.hit > 0.0 || d < 7.0 {
         HOT
