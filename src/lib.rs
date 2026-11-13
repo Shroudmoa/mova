@@ -9,6 +9,7 @@ pub mod enemy;
 pub mod game;
 pub mod goal;
 pub mod input;
+pub mod meta;
 pub mod pickup;
 pub mod player;
 pub mod power;

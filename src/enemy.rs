@@ -1,5 +1,6 @@
-//! Enemies. Three shapes, three jobs: close the distance, chase it down, and
-//! refuse to move at all.
+//! Enemies. Six shapes, six jobs: close the distance, chase it down, refuse to
+//! move at all, commit to the run, hold the line when the waves get serious, and
+//! — once the run earns it — commit harder still.
 
 use crate::game::Arena;
 use crate::solid::SolidGrid;
@@ -17,6 +18,18 @@ pub enum Kind {
     /// Too heavy to shove. Only the gun moves it. This is the reason the gun
     /// exists in a game about running into things, so it has to matter.
     Brute,
+    /// The wave's first mind of scheme. It does not weave and it does not orbit:
+    /// it closes, and once it closes it *commits*, which is a different thing
+    /// from timing a burst off a timer.
+    Harrier,
+    /// The late-wave siege. Slow to close, hard to move, worth more to kill.
+    /// It does not scheme — it holds — and the threat is that holding is the
+    /// plan rather than the accident.
+    Warden,
+    /// The mid-run siege. Slow to close even by the warden's measure, then
+    /// commits with more haste than a harrier should, which is the whole threat
+    /// of a boss wearing the enemy's vocabulary.
+    Harbinger,
 }
 
 impl Kind {
@@ -26,6 +39,9 @@ impl Kind {
             Kind::Grunt => 2,
             Kind::Runner => 1,
             Kind::Brute => 6,
+            Kind::Harrier => 2,
+            Kind::Warden => 14,
+            Kind::Harbinger => 30,
         }
     }
 
@@ -35,6 +51,9 @@ impl Kind {
             Kind::Grunt => RADIUS,
             Kind::Runner => 0.85,
             Kind::Brute => 2.0,
+            Kind::Harrier => 0.9,
+            Kind::Warden => 2.2,
+            Kind::Harbinger => 3.0,
         }
     }
 
@@ -45,6 +64,9 @@ impl Kind {
             Kind::Grunt => 1.0,
             Kind::Runner => 1.15,
             Kind::Brute => 0.58,
+            Kind::Harrier => 1.45,
+            Kind::Warden => 0.5,
+            Kind::Harbinger => 0.75,
         }
     }
 
@@ -55,6 +77,13 @@ impl Kind {
             // The runner points where it is going, which is most of the tell.
             Kind::Runner => '>',
             Kind::Brute => 'O',
+            // The harrier reads as an incoming decision: a small mark that is
+            // about to commit somewhere.
+            Kind::Harrier => '!',
+            // The warden reads as a wall that happens to be alive: heavy, and
+            // therefore not something you shove — something you burn down.
+            Kind::Warden => 'W',
+            Kind::Harbinger => 'H',
         }
     }
 
@@ -65,14 +94,18 @@ impl Kind {
             Kind::Grunt => 1.0,
             Kind::Runner => 1.35,
             Kind::Brute => 3.6,
+            Kind::Harrier => 1.7,
+            Kind::Warden => 4.5,
+            Kind::Harbinger => 6.0,
         }
     }
 
     /// Heavy things ignore a ram entirely. Momentum is not a universal answer,
-    /// and the player should learn which enemies to stop running at.
+    /// and the player should learn which enemies to stop running at. The warden
+    /// is heavy by trade, which is the whole point of the elite.
     #[inline]
     pub fn heavy(self) -> bool {
-        matches!(self, Kind::Brute)
+        matches!(self, Kind::Brute | Kind::Warden | Kind::Harbinger)
     }
 }
 
@@ -177,8 +210,51 @@ impl Enemy {
                     rush = 2.2;
                 }
             }
-            // Brutes just walk at you. The weight is the point.
-            Kind::Brute => {}
+            // Brutes just walk at you. The weight is the point. The warden is
+            // the same creed with a slower cadence and a thicker hull; the
+            // harbinger is that creed with a longer fuse and a harder commit.
+            Kind::Brute | Kind::Warden => {}
+            Kind::Harbinger => {
+                self.burst_t -= dt;
+                if self.burst_t <= 0.0 {
+                    self.burst_t = 1.2 + self.wob * 0.3;
+                    self.rush = 0.5;
+                }
+                self.rush = (self.rush - dt).max(0.0);
+                if self.rush > 0.0 {
+                    rush = 3.5;
+                }
+                // Proximity, not a clock — the same as the harrier, only with a
+                // longer fuse and a harder commit, because the boss is the thing
+                // the player has been learning to fear.
+                if len < 14.0 {
+                    self.burst_t = 0.0;
+                    self.rush = 3.5;
+                }
+            }
+            // The harrier's trick is that its burst is a commitment. It does not
+            // weave into the charge and it does not decide halfway through: the
+            // moment it closes within burst range it plants itself on a heading,
+            // which is a different gamble from the runner's free-running timer and
+            // one the player reads off the direction of travel rather than off a
+            // countdown.
+            Kind::Harrier => {
+                self.burst_t -= dt;
+                if self.burst_t <= 0.0 {
+                    self.burst_t = 0.8 + self.wob * 0.3;
+                    self.rush = 0.5;
+                }
+                self.rush = (self.rush - dt).max(0.0);
+                if self.rush > 0.0 {
+                    rush = 2.6;
+                }
+                // Proximity, not a clock: closing in arms the charge, and while
+                // it holds the harrier holds its heading.
+                if len < 9.0 {
+                    self.burst_t = 0.0;
+                    self.rush = 2.6;
+                }
+            }
         }
 
         // Steering: blend the heading toward the tangent of whatever we just
@@ -196,7 +272,19 @@ impl Enemy {
             uy /= l;
         }
 
-        let step = self.spd * rush * dt;
+        // The warden is a siege engine, not a sprinter. It walks slow and hits
+        // like one, and once its hull starts burning it stops pretending
+        // otherwise: the enrage is read off the hull rather than latched, so it
+        // is a threshold on the hp and not a state the spawner has to remember
+        // to set. Same trick as the chain's hop count — derive, don't store.
+        let spd = if (self.kind == Kind::Warden || self.kind == Kind::Harbinger)
+            && self.hp * 2 < self.kind.hp()
+        {
+            self.spd * 1.8
+        } else {
+            self.spd
+        };
+        let step = spd * rush * dt;
         self.x += ux * step;
         self.y += uy * step;
 

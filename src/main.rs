@@ -93,6 +93,17 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Action::Radar => game.radar = !game.radar,
+            Action::Shop => {
+                // Only between runs: from the menu or the game-over screen. A
+                // shop is a place you leave a run from, not one you wander while
+                // in it.
+                if game.phase == Phase::Menu || game.phase == Phase::Over {
+                    game.phase = Phase::Shop;
+                }
+            }
+            Action::Buy(i) => {
+                game.buy(i);
+            }
             Action::None => {}
         }
 

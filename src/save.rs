@@ -31,6 +31,13 @@ pub struct Save {
     /// One bit per sector MOVA has ever stood in. This is the map's memory and
     /// it outlives any single run, so the arena fills in over time.
     pub sectors: u32,
+    /// Cores earned from runs and spent in the shop between them. The
+    /// meta-progression layer; see [`crate::meta`].
+    pub cores: u32,
+    /// Bitmask of shop items owned. Bit `N` is [`crate::meta::ITEM_<N>`]:
+    /// owned drive upgrades apply, owned power unlocks open the rack slot.
+    /// This is the map's memory for the shop, and it outlives any single run.
+    pub unlocks: u32,
 }
 
 impl Save {
@@ -114,6 +121,8 @@ pub fn load() -> Save {
             "combo" => s.best_combo = v,
             "goals" => s.goals = v,
             "sectors" => s.sectors = v,
+            "cores" => s.cores = v,
+            "unlocks" => s.unlocks = v,
             _ => {}
         }
     }
@@ -139,6 +148,8 @@ pub fn store(s: &Save) {
         ("combo", s.best_combo),
         ("goals", s.goals),
         ("sectors", s.sectors),
+        ("cores", s.cores),
+        ("unlocks", s.unlocks),
     ];
     for (k, v) in fields {
         let _ = writeln!(text, "{k}={v}");

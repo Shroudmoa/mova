@@ -15,9 +15,12 @@ cargo run --release
 | `SPACE` | dash — brief burst of speed, short invulnerability |
 | `E` | virus — purge a wide ring around MOVA, then recharge |
 | `B` | overcharge — lift the speed cap and cut drag for six seconds |
+| `C` | chain lightning — fire off a kill once unlocked |
+| `N` | magnet hold — pull pickups close once unlocked |
 | `P` | pause, without leaving the run |
 | `M` | show / hide the corner radar |
 | `G` | goal ledger, from the menu or the game-over screen |
+| `U` | shop, between runs (also backs out of it) |
 | `ENTER` | start / retry |
 | `Q` / `ESC` / `CTRL-C` | quit |
 
@@ -36,12 +39,43 @@ matters is where you stand and how fast you are moving when things die.
   gets tighter the higher it goes. Taking a hit resets it to zero.
 - **Waves only get worse.** More enemies, faster enemies, tighter spawns.
 
-**Two powers.** `E` lets a virus loose: everything inside a wide ring around
-MOVA dies at once, pillars included. `B` overcharges the drive: the cap and drag
-lift for six seconds, opening a higher burn tier. Both charge on their own; the
-pips above the dash readout show how much each has left.
+**Four powers.** `E` lets a virus loose: everything inside a wide ring around
+MOVA dies at once, pillars included, then recharges. `B` overcharges the drive: the
+cap and drag lift for six seconds, opening a higher burn tier. Both are the
+player's from the start; the pips above the dash readout show how much charge is
+left.
+
+Two of them are shop finds. `C` chain lightning arcs off a kill to the next
+enemy in range, so a fast kill reads as a line rather than a punctuation mark.
+`N` magnet hold pulls pickups close while charged, so a roam becomes a grab
+instead of a treasure hunt. Until they are unlocked, the keys are not the
+player's.
+
+**The meta layer.** Between runs the game opens a shop. A finished run pays out
+**cores** — score divided by twenty-five, plus a small performance bonus for a
+clean run, plus a floor scaled to the wave reached — and the shop spends them on
+permanent drive upgrades (overcharge cell, surge cell, momentum core, dash coil)
+and on power unlocks (chain cable, magnet coil). The next run starts from
+whatever was bought. See `docs/v3-progression-loop.md`.
 
 Three hit points. The flash means you got hit.
+
+## v3 — the next gen, in slices
+
+The first slices of the planned v3 are in. Between runs you now run a small shop,
+the enemy roster has grown an elite and a boss, and two new powers sit on the
+rack.
+
+- **Meta-progression and unlocks.** Cores from score and clean runs; a shop
+  between runs buys permanent drive upgrades and power unlocks.
+- **New powers.** Chain lightning (`C`) and magnet hold (`N`).
+- **New enemies.** The `!` **Harrier** commits to a charge, the `W` **Warden** is
+  a ram-proof late-wave elite that enrages when its hull burns, and the `H`
+  **Harbinger** is the mid-run boss: one siege opens a boss wave from wave seven,
+  then every fifth wave after that.
+
+The full designs live in `docs/`: the progression loop, the new-system designs,
+and the vertical slice notes.
 
 ## v2 — free roam
 
@@ -70,10 +104,14 @@ and refilling, so a roaming run crosses one every few seconds:
 | `*` **Surge** | 7 seconds above the speed cap with the drag turned down |
 | `+` **Heal** | one hit point; only ever spawns while you are actually hurt |
 
-**Three enemies instead of one.** `x` Grunt weaves and takes two hits. `>` Runner
+**Four enemies instead of one.** `x` Grunt weaves and takes two hits. `>` Runner
 sprints and dies to anything, including a ram. `O` Brute takes six and is too
 heavy to ram at all — it has to be shot, and the gun will prefer anything softer
-that is in range.
+that is in range. `!` **Harrier** closes distance and then commits to a charge
+instead of weaving on a timer.
+
+The v3 slices below add two more: the `W` Warden elite and the `H` Harbinger
+boss.
 
 **A radar, because a scrolling camera lies by omission.** The disc in the top
 corner shows the pillars around you, the loot in range, and every enemy with the
@@ -90,13 +128,14 @@ popups on pickups.
 src/
   main.rs        fixed-step loop, terminal setup, overlay state, teardown
   lib.rs         module list, so tests can drive the game without a terminal
+  meta.rs        the shop catalog, the core economy, the permanent drive layer
   game.rs        world state, waves, spawning, collision resolution, sectors
   solid.rs       map generation and the collision resolve
   region.rs      the six sector names and the lookup
   pickup.rs      pickup kinds, magnet, bob
-  player.rs      movement, dash, surge, the full-speed burn, damage
-  power.rs       power charges, names, keys, and the virus tuning
-  enemy.rs       the three enemy kinds and how they steer around pillars
+  player.rs      movement, dash, surge, the full-speed burn, damage, drive overrides
+  power.rs       power charges, names, keys, and the power tuning
+  enemy.rs       the four enemy kinds and how they steer around pillars
   projectile.rs  auto-fire and target selection
   score.rs       score, combo, short-lived feedback effects
   goal.rs        the sixteen goals and the per-run stat block

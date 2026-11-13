@@ -28,6 +28,9 @@ pub const DASH_IFRAMES: f32 = 0.06;
 /// Invulnerability after eating a hit.
 pub const HIT_IFRAMES: f32 = 1.0;
 
+/// How long the Magnet holds pickups it has pulled close.
+pub const MAGNET_TIME: f32 = 6.0;
+
 /// A bounce leaves MOVA over the normal cap for a moment, which is what makes a
 /// chain of them feel like one continuous shove instead of separate hits.
 pub const BOOST_TIME: f32 = 0.55;
@@ -75,7 +78,20 @@ pub struct Player {
     /// game that raises the ceiling above the normal cap, and the arena turns
     /// into a racetrack while it lasts.
     pub surge: f32,
+    /// Counts down while the Magnet holds pickups close. Set for one power
+    /// charge, which is the whole point: it is a find, not a stat.
+    pub magnet_t: f32,
     pub alive: bool,
+
+    /// Permanent, meta-bought overrides. Zero means the base tuning, so a fresh
+    /// player reads exactly like the shipped numbers. The shop writes these
+    /// through the save's unlock bitmask, which keeps "bought" and "applied" as
+    /// two honest steps rather than one muddy one.
+    pub drive_overcharge: f32,
+    pub drive_surge: f32,
+    pub drive_max: f32,
+    pub drive_dash_cd: f32,
+    pub drive_dash_speed: f32,
 
     /// Distance still to cover before the next ember is thrown. See
     /// [`Self::EMBER_GAP`].
@@ -107,9 +123,27 @@ impl Player {
             bounce_t: 0.0,
             flash: 0.0,
             surge: 0.0,
+            magnet_t: 0.0,
             alive: true,
             ember_gap: 0.0,
+            drive_overcharge: 0.0,
+            drive_surge: 0.0,
+            drive_max: 0.0,
+            drive_dash_cd: 0.0,
+            drive_dash_speed: 0.0,
         }
+    }
+
+    /// A player as the save file leaves them: the base tuning, plus whatever
+    /// the shop bought. A fresh save buys nothing, so this is the base player.
+    pub fn from_save(save: &crate::save::Save) -> Self {
+        let mut p = Self::new();
+        p.drive_overcharge = crate::meta::overcharge_secs(save);
+        p.drive_surge = crate::meta::surge_secs(save);
+        p.drive_max = crate::meta::max_speed(save);
+        p.drive_dash_cd = crate::meta::dash_cd(save);
+        p.drive_dash_speed = crate::meta::dash_speed(save);
+        p
     }
 
     /// Seconds a Surge pickup lasts, and how much extra headroom it buys. With
@@ -146,6 +180,62 @@ impl Player {
         self.overcharge > 0.0
     }
 
+    /// Seconds a Surge pickup lasts, bought or base. The Capacitor widens it.
+    #[inline]
+    pub fn surge_time(&self) -> f32 {
+        if self.drive_surge > 0.0 {
+            self.drive_surge
+        } else {
+            Self::SURGE_TIME
+        }
+    }
+
+    /// Seconds of raised cap from an Overcharge, bought or base.
+    #[inline]
+    pub fn overcharge_time(&self) -> f32 {
+        if self.drive_overcharge > 0.0 {
+            self.drive_overcharge
+        } else {
+            Self::OVERCHARGE_TIME
+        }
+    }
+
+    /// The ceiling MOVA is held to right now, bought or base.
+    #[inline]
+    pub fn max_speed(&self) -> f32 {
+        if self.drive_max > 0.0 {
+            self.drive_max
+        } else {
+            MAX_SPEED
+        }
+    }
+
+    /// Seconds between dashes, bought or base. The Coil trims the cooldown.
+    #[inline]
+    pub fn dash_cd(&self) -> f32 {
+        if self.drive_dash_cd > 0.0 {
+            self.drive_dash_cd
+        } else {
+            DASH_CD
+        }
+    }
+
+    /// Burst speed of a dash, bought or base. The Coil pushes it a little harder.
+    #[inline]
+    pub fn dash_speed(&self) -> f32 {
+        if self.drive_dash_speed > 0.0 {
+            self.drive_dash_speed
+        } else {
+            DASH_SPEED
+        }
+    }
+
+    /// True while the Magnet holds pickups it has pulled close.
+    #[inline]
+    pub fn magneting(&self) -> bool {
+        self.magnet_t > 0.0
+    }
+
     /// True once MOVA is travelling at the cap. This is the state the whole
     /// speed game is built around: contact stops landing, and MOVA burns.
     #[inline]
@@ -161,7 +251,7 @@ impl Player {
     /// The ceiling MOVA is held to right now.
     #[inline]
     pub fn cap(&self) -> f32 {
-        let mut c = MAX_SPEED;
+        let mut c = self.max_speed();
         if self.boost > 0.0 {
             c *= BOOST_CAP;
         }
@@ -218,8 +308,8 @@ impl Player {
 
         if self.dashing() {
             self.dash_t -= dt;
-            self.vx = self.dash_dx * DASH_SPEED;
-            self.vy = self.dash_dy * DASH_SPEED;
+            self.vx = self.dash_dx * self.dash_speed();
+            self.vy = self.dash_dy * self.dash_speed();
             // Trail: a short line of dots directly behind the dash direction.
             fx.particle(
                 self.x,
@@ -245,7 +335,7 @@ impl Player {
                 self.dash_dx = dx;
                 self.dash_dy = dy;
                 self.dash_t = DASH_TIME;
-                self.dash_cd = DASH_CD;
+                self.dash_cd = self.dash_cd();
                 self.invuln = self.invuln.max(DASH_IFRAMES);
                 fx.particle(self.x, self.y, 0.0, 0.0, 0.18, 1);
             }
@@ -387,13 +477,20 @@ impl Player {
 
     /// A Surge pickup connects.
     pub fn surge(&mut self) {
-        self.surge = Self::SURGE_TIME;
+        self.surge = self.surge_time();
+    }
+
+    /// A Magnet connects. The player is held, not the world: everything within
+    /// reach slides home, which is the whole difference between hoarding a
+    /// pickup and having a reason to roam.
+    pub fn magnet(&mut self) {
+        self.magnet_t = MAGNET_TIME;
     }
 
     /// An Overcharge connects. The cap and drag are lifted for a few seconds,
     /// which is a window onto a speed tier normally out of reach.
     pub fn overcharge(&mut self) {
-        self.overcharge = Self::OVERCHARGE_TIME;
+        self.overcharge = self.overcharge_time();
     }
 
     /// A ram connects: MOVA keeps the momentum and gains a good deal more.

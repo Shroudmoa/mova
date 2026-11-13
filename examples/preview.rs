@@ -52,6 +52,7 @@ fn main() {
         Phase::Menu => "menu",
         Phase::Playing => "playing",
         Phase::Over => "over",
+        Phase::Shop => "shop",
     };
     println!(
         "phase={phase} sector={} wave={} enemies={} pickups={} solids={}",

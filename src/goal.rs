@@ -103,6 +103,10 @@ pub struct RunStats {
     pub heals: u32,
     /// Brutes killed.
     pub brutes: u32,
+    /// Wardens killed. The late-wave siege, when it falls.
+    pub wards: u32,
+    /// Harbingers killed. The mid-run siege, when it falls.
+    pub harbingers: u32,
 }
 
 impl RunStats {

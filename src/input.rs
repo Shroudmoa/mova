@@ -1,6 +1,6 @@
 //! Input: raw key state plus a few one-shot actions.
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::time::Duration;
 
 /// Debounce for the pause toggle. Terminals repeat a held key, and without
@@ -20,6 +20,10 @@ pub struct Input {
     pub virus: bool,
     /// Edge triggered: starts an Overcharge.
     pub overcharge: bool,
+    /// Edge triggered: fires Chain Lightning off a kill or directly.
+    pub chain: bool,
+    /// Edge triggered: starts a Magnet hold.
+    pub magnet: bool,
 }
 
 impl Input {
@@ -42,6 +46,8 @@ impl Input {
         self.dash = false;
         self.virus = false;
         self.overcharge = false;
+        self.chain = false;
+        self.magnet = false;
     }
 }
 
@@ -55,6 +61,11 @@ pub enum Action {
     Pause,
     /// Shows or hides the corner radar.
     Radar,
+    /// Opens the shop between runs.
+    Shop,
+    /// Buys a shop item. Carries the catalog index, which is the only thing the
+    /// input layer needs to know about the shop.
+    Buy(usize),
 }
 
 /// Rolling record of which action keys are down, so auto-repeat from the
@@ -65,6 +76,8 @@ pub struct Repeat {
     goals: f32,
     pause: f32,
     radar: f32,
+    shop: f32,
+    buy: f32,
 }
 
 impl Repeat {
@@ -94,14 +107,18 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
     let mut want_goals = false;
     let mut want_pause = false;
     let mut want_radar = false;
+    let mut want_shop = false;
+    let mut want_buy: Option<usize> = None;
     let mut want_confirm = false;
 
-    let key = |k: crossterm::event::KeyEvent,
+    let key = |k: KeyEvent,
                input: &mut Input,
                quit: &mut bool,
                goals: &mut bool,
                pause: &mut bool,
                radar: &mut bool,
+               shop: &mut bool,
+               buy: &mut Option<usize>,
                confirm: &mut bool| {
         if k.kind == KeyEventKind::Release {
             // Not all terminals report releases, but honour them when they arrive.
@@ -126,6 +143,10 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
                 | KeyCode::Char('S')
                 | KeyCode::Char('j')
                 | KeyCode::Char('J') => input.down = false,
+                KeyCode::Char('c') | KeyCode::Char('C') => input.chain = false,
+                KeyCode::Char('n') | KeyCode::Char('N') => input.magnet = false,
+                KeyCode::Char('u') | KeyCode::Char('U') => *shop = false,
+                KeyCode::Char(d) if d.is_ascii_digit() => *buy = None,
                 _ => {}
             }
             return;
@@ -151,6 +172,10 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
             | KeyCode::Char('S')
             | KeyCode::Char('j')
             | KeyCode::Char('J') => input.down = true,
+            KeyCode::Char('c') | KeyCode::Char('C') => input.chain = true,
+            KeyCode::Char('n') | KeyCode::Char('N') => input.magnet = true,
+            KeyCode::Char('u') | KeyCode::Char('U') => *shop = true,
+            KeyCode::Char(d) if d.is_ascii_digit() => *buy = Some((d as usize) - 1),
             KeyCode::Char(' ') => input.dash = true,
             KeyCode::Char('e') | KeyCode::Char('E') => input.virus = true,
             KeyCode::Char('b') | KeyCode::Char('B') => input.overcharge = true,
@@ -172,6 +197,8 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
                 &mut want_goals,
                 &mut want_pause,
                 &mut want_radar,
+                &mut want_shop,
+                &mut want_buy,
                 &mut want_confirm,
             ),
             Ok(_) => {}
@@ -187,6 +214,10 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
         Action::Pause
     } else if Repeat::allow(&mut rep.radar, want_radar, dt) {
         Action::Radar
+    } else if Repeat::allow(&mut rep.shop, want_shop, dt) {
+        Action::Shop
+    } else if Repeat::allow(&mut rep.buy, want_buy.is_some(), dt) {
+        want_buy.map(Action::Buy).unwrap_or(Action::None)
     } else if want_confirm {
         Action::Confirm
     } else {

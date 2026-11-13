@@ -16,7 +16,7 @@ use crate::enemy::Enemy;
 use crate::game::{Arena, Game, Phase, ARENA_HX, ARENA_HY};
 use crate::goal;
 use crate::pickup::Pickup;
-use crate::player::{Player, DASH_CD};
+use crate::player::Player;
 use crate::power;
 use crate::region;
 use crate::save;
@@ -295,6 +295,7 @@ pub fn render(buf: &mut Buffer, area: Rect, game: &Game) {
         Phase::Menu => menu(buf, area, game),
         Phase::Playing => play(buf, area, game),
         Phase::Over => over(buf, area, game),
+        Phase::Shop => shop(buf, area, game),
     }
 }
 
@@ -417,7 +418,7 @@ fn menu(buf: &mut Buffer, area: Rect, game: &Game) {
         buf,
         area,
         y + 11,
-        "[ ENTER ] RUN   [ P ] PAUSE   [ M ] RADAR   [ G ] GOALS   [ Q ] QUIT",
+        "[ ENTER ] RUN   [ P ] PAUSE   [ M ] RADAR   [ G ] GOALS   [ U ] SHOP   [ Q ] QUIT",
         Style::new().fg(PALE).bg(BG),
     );
 }
@@ -605,8 +606,8 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
     s.clear();
     let _ = write!(
         s,
-        "{} CORES   {} SECTORS   {} BRUTES",
-        st.cores, st.sectors, st.brutes
+        "{} CORES   {} SECTORS   {} BRUTES   {} WARDEN   {} HARBINGER",
+        st.cores, st.sectors, st.brutes, st.wards, st.harbingers
     );
     center(
         buf,
@@ -674,7 +675,65 @@ fn over(buf: &mut Buffer, area: Rect, game: &Game) {
         buf,
         area,
         y + rows - 1,
-        "[ ENTER ] RETRY     [ G ] GOALS     [ Q ] QUIT",
+        "[ ENTER ] RETRY     [ G ] GOALS     [ U ] SHOP     [ Q ] QUIT",
+        Style::new().fg(PALE).bg(BG),
+    );
+}
+
+// ---- shop ------------------------------------------------------------------
+
+/// The between-runs shop. Plain text over the map backdrop, because the shop
+/// is a place you stand between runs and the map is still the thing you know how
+/// to read.
+fn shop(buf: &mut Buffer, area: Rect, game: &Game) {
+    let inner = frame_box(buf, area);
+    let c = cam(inner, 0.0, 0.0);
+    grid(buf, inner, &c, false);
+    for s in &game.solids.solids {
+        draw_solid(buf, inner, &c, &game.solids, s, false);
+    }
+
+    let rows = 11i32 + crate::meta::ITEM_COUNT as i32;
+    let y = area.y as i32 + (area.height as i32 - rows) / 2;
+
+    centered_colored(buf, area, y, "S H O P", &[DEEP, COOL, GLARE, PALE], 0.2);
+    center(
+        buf,
+        area,
+        y + 2,
+        "SPEND CORES. THE DRIVE ONLY GETS STRONGER.",
+        Style::new().fg(FAINT).bg(BG),
+    );
+
+    for i in 0..crate::meta::ITEM_COUNT {
+        let owned = game.save.unlocks & (1u32 << i) != 0;
+        let mut s = String::with_capacity(32);
+        let _ = write!(
+            s,
+            "[{:^2}] {:<16} {:>3}c   {}",
+            i + 1,
+            crate::meta::item_name(i),
+            crate::meta::cost(i),
+            crate::meta::item_desc(i),
+        );
+        center(
+            buf,
+            area,
+            y + 4 + i as i32,
+            &s,
+            if owned {
+                Style::new().fg(PALE).bg(BG)
+            } else {
+                Style::new().fg(if i % 2 == 0 { COOL } else { FAINT }).bg(BG)
+            },
+        );
+    }
+
+    center(
+        buf,
+        area,
+        y + rows - 2,
+        "[ 1-6 ] BUY      [ ENTER ] RUN      [ U ] BACK",
         Style::new().fg(PALE).bg(BG),
     );
 }
@@ -826,7 +885,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
     // A sustained Surge readout, because a 7-second window nobody notices is
     // seven seconds of an unclaimed bonus.
     if game.player.surging() {
-        let a = (game.player.surge / Player::SURGE_TIME).clamp(0.0, 1.0);
+        let a = (game.player.surge / game.player.surge_time()).clamp(0.0, 1.0);
         let left = game.player.surge.ceil() as u32;
         let mut s = String::with_capacity(12);
         let _ = write!(s, "SURGE {}s", left);
@@ -841,7 +900,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
     }
 
     if game.player.overcharged() {
-        let a = (game.player.overcharge / Player::OVERCHARGE_TIME).clamp(0.0, 1.0);
+        let a = (game.player.overcharge / game.player.overcharge_time()).clamp(0.0, 1.0);
         let left = game.player.overcharge.ceil() as u32;
         let mut s = String::with_capacity(16);
         let _ = write!(s, "OVERCHARGE {}s", left);
@@ -857,11 +916,16 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
     }
 
     // Power charge, last so the world cannot dot over the readout.
+    //
+    // Drawn a few rows up from the very bottom: the bottom content row is the
+    // HUD's own, and the rows above are spoken for by the hint, the surge and
+    // the overcharge readouts. Sharing a row with whatever the player is doing
+    // is how a four-slot rack ends up scribbling over a wall.
     power_bar(
         buf,
         inner,
         inner.right() as i32 - 1,
-        inner.bottom() as i32 - 1,
+        inner.bottom() as i32 - 4,
         game,
     );
 
@@ -1420,7 +1484,7 @@ fn gap(buf: &mut Buffer, area: Rect, x: i32, y: i32, n: i32) {
 /// One label and a four-pip charge for each power, right-aligned above the
 /// dash readout. A ready slot pulses; a filling one shows how much is left.
 fn power_bar(buf: &mut Buffer, area: Rect, right: i32, y: i32, game: &Game) {
-    let mut total = 2 * (power::COUNT as i32 - 1);
+    let mut total = (power::COUNT as i32 - 1) * 2;
     for name in power::NAMES {
         total += 4 + name.chars().count() as i32 + 1 + 4;
     }
@@ -1444,7 +1508,11 @@ fn power_bar(buf: &mut Buffer, area: Rect, right: i32, y: i32, game: &Game) {
         line(buf, area, x, y, &label, Style::new().fg(col).bg(BG));
         x += label.chars().count() as i32;
 
-        let filled = (game.power.ratio(i) * 4.0).ceil() as i32;
+        let filled = if ready {
+            (game.power.ratio(i) * 4.0).ceil() as i32
+        } else {
+            0
+        };
         for p in 0..4 {
             let on = p < filled;
             putc(
@@ -1624,7 +1692,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
         s.push_str("DASH READY");
         COOL
     } else {
-        let _ = write!(s, "DASH {:.1}", p.dash_cd / DASH_CD);
+        let _ = write!(s, "DASH {:.1}", p.dash_cd / p.dash_cd());
         DIM_RED
     };
     line(
@@ -1655,7 +1723,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
                 y,
                 &s,
                 Style::new()
-                    .fg(mix(GLARE, COOL, 1.0 - p.surge / Player::SURGE_TIME))
+                    .fg(mix(GLARE, COOL, 1.0 - p.surge / p.surge_time()))
                     .bg(BG),
             );
         }

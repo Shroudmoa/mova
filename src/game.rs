@@ -76,6 +76,9 @@ pub enum Phase {
     Menu,
     Playing,
     Over,
+    /// The shop between runs. Owns no simulation state; the renderer draws it
+    /// and the input layer routes buys into it.
+    Shop,
 }
 
 pub struct Arena {
@@ -199,7 +202,7 @@ impl Game {
             | 1;
         Self {
             phase: Phase::Menu,
-            player: Player::new(),
+            player: Player::from_save(&save),
             enemies: Vec::with_capacity(MAX_ENEMIES),
             bullets: Vec::with_capacity(projectile::MAX),
             solids: SolidGrid::new(seed ^ seed.rotate_left(15)),
@@ -208,7 +211,7 @@ impl Game {
             fx: Fx::new(),
             arena: Arena::new(),
             save,
-            power: Power::new(),
+            power: Power::new(save.unlocks),
             stats: RunStats::default(),
             wave: 1,
             new_goals: 0,
@@ -270,8 +273,8 @@ impl Game {
     }
 
     pub fn start(&mut self) {
-        self.player = Player::new();
-        self.power = Power::new();
+        self.player = Player::from_save(&self.save);
+        self.power = Power::new(self.save.unlocks);
         // A new map every run. It has to be the first thing rebuilt: pickups,
         // spawns and the opening push all read the furniture, and rolling any
         // of them against the previous run's pillars would put a core inside a
@@ -318,6 +321,15 @@ impl Game {
         if self.phase != Phase::Playing {
             self.start();
         }
+    }
+
+    /// Spends cores on a shop item. The save's unlock bitmask is the whole
+    /// effect: an owned drive upgrade is read as an override the next time a
+    /// player is built, and an owned power unlock puts the slot on the rack the
+    /// next time one is. Both are permanent, both are simple, and both land on
+    /// the same bit.
+    pub fn buy(&mut self, item: usize) -> bool {
+        item < crate::meta::ITEM_COUNT && crate::meta::buy(&mut self.save, item)
     }
 
     /// Advances only what the paused screen is allowed to animate. Everything
@@ -438,16 +450,27 @@ impl Game {
         (8.5 + self.wave as f32 * 0.75).min(26.0)
     }
 
-    /// Picks what walks in. Runners show up from wave two, brutes from three.
+    /// Picks what walks in. Runners show up from wave two, brutes from three, and
+    /// the warden — the first elite — from wave five.
     fn roll_kind(&mut self) -> Kind {
         let r = self.rnd();
-        if self.wave >= 3 && r < 0.09 {
+        if self.wave >= 5 && r < 0.08 {
+            Kind::Warden
+        } else if self.wave >= 3 && r < 0.09 {
             Kind::Brute
         } else if self.wave >= 2 && r < 0.09 + 0.34 {
             Kind::Runner
         } else {
             Kind::Grunt
         }
+    }
+
+    /// Boss waves. The harbinger arrives from the seventh wave and then every
+    /// fifth wave after that, and a boss wave opens with a single siege rather
+    /// than a swarm. The spacing is wave arithmetic, not randomness, so a
+    /// player can plan the road and the road can plan the pressure.
+    fn boss_wave(&self, wave: u32) -> bool {
+        wave >= 7 && (wave - 7) % 5 == 0
     }
 
     /// The arena is much larger than the view now, so the count is set to keep
@@ -462,11 +485,19 @@ impl Game {
             self.wave_t -= WAVE_TIME;
             self.wave += 1;
             self.banner_t = 1.8;
-            // A wave opens with a burst so pressure arrives immediately.
-            let burst = 4 + self.wave as usize;
-            for _ in 0..burst {
-                if self.enemies.len() < self.max_alive() {
-                    self.spawn_enemy();
+            // A wave opens with a burst so pressure arrives immediately. A boss
+            // wave opens with the boss alone; the regular roll keeps feeding the
+            // wave around it, so the siege is a peak and not a species.
+            if self.boss_wave(self.wave) {
+                // The boss is placed by the wave, so it is not refused by a
+                // soft cap the regular roll already filled.
+                self.spawn_boss();
+            } else {
+                let burst = 4 + self.wave as usize;
+                for _ in 0..burst {
+                    if self.enemies.len() < self.max_alive() {
+                        self.spawn_enemy();
+                    }
                 }
             }
         }
@@ -487,6 +518,17 @@ impl Game {
     /// Everything is measured with [`Arena::distance`], so an enemy that comes
     /// in from the far side of the seam counts as arriving, which is what it is.
     fn spawn_enemy(&mut self) {
+        let kind = self.roll_kind();
+        self.spawn_kind(kind);
+    }
+
+    /// Puts the boss on the same ring. The boss is placed by the wave and not by
+    /// the roll, which is what keeps boss waves an event instead of a species.
+    fn spawn_boss(&mut self) {
+        self.spawn_kind(Kind::Harbinger);
+    }
+
+    fn spawn_kind(&mut self, kind: Kind) {
         let (px, py) = (self.player.x, self.player.y);
         let view_r = (self.view_hx * self.view_hx + self.view_hy * self.view_hy).sqrt();
         let mut x = px;
@@ -504,7 +546,6 @@ impl Game {
             }
         }
 
-        let kind = self.roll_kind();
         let speed = self.enemy_speed() * kind.speed() * (0.86 + self.rnd() * 0.3);
         let wob = self.rnd() * std::f32::consts::TAU;
         let turn = if self.rnd() < 0.5 { -1.0 } else { 1.0 };
@@ -588,7 +629,10 @@ impl Game {
             let dx = Arena::delta_axis(p.x, px, self.arena.hx);
             let dy = Arena::delta_axis(p.y, py, self.arena.hy);
             let d2 = dx * dx + dy * dy;
-            if d2 < magnet2 && d2 > 0.001 {
+            if self.player.magneting()
+                && d2 < magnet2
+                && d2 > 0.001
+            {
                 let d = d2.sqrt();
                 // The pull is refused if it would drag the pickup into a
                 // pillar. Cheap, and it stops an orb being sucked into a wall
@@ -834,6 +878,18 @@ impl Game {
                 self.overcharge();
             }
         }
+        if input.chain {
+            input.chain = false;
+            if self.power.fire(power::CHAIN) {
+                self.chain(self.player.x, self.player.y, power::CHAIN_HOPS);
+            }
+        }
+        if input.magnet {
+            input.magnet = false;
+            if self.power.fire(power::MAGNET) {
+                self.player.magnet();
+            }
+        }
     }
 
     /// The first power: a wide purge that reaches through the map. It is not a
@@ -874,6 +930,48 @@ impl Game {
             .note(px, py, power::NAMES[power::OVERCHARGE], PopKind::Power);
         self.glitch_burst(px, py, 11.0, 18);
         self.mark_floor(px, py, 11.0, 16);
+    }
+
+    /// Lightning from a kill: arcs out from where the victim fell and keeps
+    /// jumping to the nearest living thing in range, so a fast kill reads as a
+    /// line rather than a punctuation mark.
+    ///
+    /// The reach is measured from the victim's position, which is where the
+    /// player already was — the bolt starts at the moment of impact and spreads
+    /// from there, so it skips the lane the victim crossed rather than spraying
+    /// backwards along MOVA's own wake.
+    fn chain(&mut self, x: f32, y: f32, hops: usize) {
+        if hops == 0 {
+            return;
+        }
+        let (hx, hy) = (self.arena.hx, self.arena.hy);
+        let reach2 = power::CHAIN_REACH * power::CHAIN_REACH;
+        let mut best = f32::MAX;
+        let mut best_i = None;
+        for i in 0..self.enemies.len() {
+            if self.enemies[i].dead {
+                continue;
+            }
+            let dx = Arena::delta_axis(x, self.enemies[i].x, hx);
+            let dy = Arena::delta_axis(y, self.enemies[i].y, hy);
+            let d2 = dx * dx + dy * dy;
+            if d2 > reach2 || d2 >= best {
+                continue;
+            }
+            best = d2;
+            best_i = Some(i);
+        }
+        let Some(i) = best_i else { return };
+        self.enemies[i].hp = self.enemies[i].hp.saturating_sub(power::CHAIN_DMG as u8);
+        if self.enemies[i].hp > 0 {
+            // The bolt landed and stopped, which is the honest end of a chain
+            // that found something it could not put down.
+            return;
+        }
+        self.enemies[i].dead = true;
+        let (kx, ky) = (self.enemies[i].x, self.enemies[i].y);
+        self.kill_enemy(i);
+        self.chain(kx, ky, hops - 1);
     }
 
     /// Static around a blast rather than a tidy circle: a power should read as
@@ -991,6 +1089,9 @@ impl Game {
         self.fx.ring(x, y, false, true);
         self.fx.pop(x, y, pts, PopKind::Kill);
         self.stats.kills += 1;
+        // A wake kill is a kill, and a blazing MOVA is exactly the speed that
+        // makes the chain matter.
+        self.chain(x, y, power::CHAIN_HOPS);
     }
 
     fn collide(&mut self) {
@@ -1129,6 +1230,15 @@ impl Game {
         if kind == Kind::Brute {
             self.stats.brutes += 1;
         }
+        if kind == Kind::Warden {
+            self.stats.wards += 1;
+        }
+        if kind == Kind::Harbinger {
+            self.stats.harbingers += 1;
+        }
+        // A kill is also a lightning rod. The bolt starts where the victim
+        // fell, and the chain below finds the next thing in range from there.
+        self.chain(x, y, power::CHAIN_HOPS);
     }
 
     fn ram_kill(&mut self, ei: usize) {
@@ -1147,6 +1257,9 @@ impl Game {
         self.player.kick();
         self.stats.kills += 1;
         self.stats.rams += 1;
+        // A ram is the fastest possible kill, which is exactly when the chain
+        // should start earning its keep: the player did not shoot, the line did.
+        self.chain(x, y, power::CHAIN_HOPS);
     }
 
     fn end_run(&mut self) {
@@ -1154,6 +1267,15 @@ impl Game {
         self.stats.best_combo = self.score.best_combo;
         self.stats.score = self.score.points;
         self.new_high = self.save.absorb(&self.stats, self.score.points);
+
+        // The run pays out into the meta layer: cores are the currency the shop
+        // spends, and a clean run (nothing landed) pays the performance bonus.
+        let payout = crate::meta::run_payout(
+            self.score.points,
+            self.stats.wave,
+            self.stats.hits == 0,
+        );
+        self.save.cores = self.save.cores.saturating_add(payout);
 
         // Any goal this run satisfies and no earlier run did gets ticked off,
         // permanently, and remembered for the game-over screen.
