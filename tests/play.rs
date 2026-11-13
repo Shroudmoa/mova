@@ -8,6 +8,7 @@ use mova::enemy::{Enemy, Kind};
 use mova::game::{Arena, Game, ARENA_HX, ARENA_HY};
 use mova::input::Input;
 use mova::player::{self, Player};
+use mova::power;
 use mova::renderer;
 use mova::save::Save;
 use mova::score::{EMBER, EMBER_LIFE};
@@ -770,6 +771,41 @@ fn each_run_generates_a_different_map() {
             "run {run} repeated an earlier map: the seed is not being advanced"
         );
     }
+}
+
+/// The virus is a purge, not a shot: everything inside the ring goes in one
+/// press, and the ring is wide enough that the thing standing on MOVA and the
+/// brute a few lanes out are the same problem.
+#[test]
+fn the_virus_purges_its_ring() {
+    let mut game = started((100, 30));
+    let (px, py) = (game.player.x, game.player.y);
+    game.enemies = vec![
+        Enemy::new(px, py, Kind::Brute, 0.0, 0.0, 1.0),
+        Enemy::new(px + power::REACH, py, Kind::Grunt, 0.0, 0.0, 1.0),
+        Enemy::new(px + power::REACH + 40.0, py, Kind::Grunt, 0.0, 0.0, 1.0),
+    ];
+    let mut keys = Input {
+        power: true,
+        ..Default::default()
+    };
+
+    game.update(1.0 / 120.0, &mut keys);
+
+    assert_eq!(
+        game.enemies.len(),
+        1,
+        "the virus left {} enemies standing",
+        game.enemies.len()
+    );
+    assert!(
+        Arena::delta_axis(px, game.enemies[0].x, ARENA_HX) > power::REACH,
+        "the survivor was inside the ring"
+    );
+    assert!(
+        !game.power.ready(),
+        "the virus fired without spending its charge"
+    );
 }
 
 /// A different map is only worth having if it is still playable, so the spawn

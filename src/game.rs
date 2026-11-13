@@ -5,10 +5,11 @@ use crate::goal::{self, RunStats};
 use crate::input::Input;
 use crate::pickup::{self, Kind as Pick, Pickup};
 use crate::player::{self, Player};
+use crate::power::{self, Power};
 use crate::projectile::{self, Projectile};
 use crate::region;
 use crate::save::{self, Save};
-use crate::score::{Fx, PopKind, Score, EMBER};
+use crate::score::{Fx, PopKind, Score, EMBER, GLITCH};
 use crate::solid::SolidGrid;
 
 /// Half-extents of the play space in world units. There is no wall at either:
@@ -148,6 +149,7 @@ pub struct Game {
     pub fx: Fx,
     pub arena: Arena,
     pub save: Save,
+    pub power: Power,
 
     pub stats: RunStats,
     pub wave: u32,
@@ -206,6 +208,7 @@ impl Game {
             fx: Fx::new(),
             arena: Arena::new(),
             save,
+            power: Power::new(),
             stats: RunStats::default(),
             wave: 1,
             new_goals: 0,
@@ -268,6 +271,7 @@ impl Game {
 
     pub fn start(&mut self) {
         self.player = Player::new();
+        self.power = Power::new();
         // A new map every run. It has to be the first thing rebuilt: pickups,
         // spawns and the opening push all read the furniture, and rolling any
         // of them against the previous run's pillars would put a core inside a
@@ -337,6 +341,8 @@ impl Game {
 
         self.player
             .update(dt, input, &self.arena, &self.solids, &mut self.fx);
+        self.power.update(dt);
+        self.power_tick(input);
         self.sector_tick();
         self.spawn_tick(dt);
         self.enemies_tick(dt);
@@ -810,6 +816,63 @@ impl Game {
         self.fx.burst(x, y, 20.0);
         self.fx.ring(x, y, false, true);
         self.fx.pop(x, y, pts, PopKind::Ram);
+        self.stats.kills += 1;
+    }
+
+    /// The first power: a wide purge that reaches through the map. It is not a
+    /// projectile or a shockwave, so pillars do not stop it; what it catches
+    /// simply stops existing. `E` spends a charge, and the charge fills on its
+    /// own, which keeps the power a moment to notice and choose.
+    fn power_tick(&mut self, input: &mut Input) {
+        if !input.power {
+            return;
+        }
+        input.power = false;
+        if !self.power.fire() {
+            return;
+        }
+
+        let (px, py) = (self.player.x, self.player.y);
+        let reach = power::REACH + max_enemy_r(&self.enemies);
+        let reach2 = reach * reach;
+        self.fx.wave(px, py, reach, true);
+        self.fx.ring(px, py, true, true);
+        self.fx.note(px, py, power::NAME, PopKind::Power);
+
+        // Static around the blast rather than a tidy circle: the power should
+        // read as interference, not as another gun.
+        for _ in 0..36 {
+            let a = self.rnd() * std::f32::consts::TAU;
+            let d = self.rnd() * reach;
+            let (x, y) = self.arena.wrap(px + a.cos() * d, py + a.sin() * d);
+            let (vx, vy) = (a.cos() * 14.0, a.sin() * 14.0);
+            let life = 0.18 + self.rnd() * 0.28;
+            self.fx.particle(x, y, vx, vy, life, GLITCH);
+        }
+
+        for ei in 0..self.enemies.len() {
+            if self.enemies[ei].dead {
+                continue;
+            }
+            let dx = Arena::delta_axis(px, self.enemies[ei].x, self.arena.hx);
+            let dy = Arena::delta_axis(py, self.enemies[ei].y, self.arena.hy);
+            if dx * dx + dy * dy > reach2 {
+                continue;
+            }
+            self.enemies[ei].dead = true;
+            self.power_kill(ei);
+        }
+    }
+
+    fn power_kill(&mut self, ei: usize) {
+        let (x, y) = (self.enemies[ei].x, self.enemies[ei].y);
+        let kind = self.enemies[ei].kind;
+        let (pts, _) = self
+            .score
+            .kill_at(self.player.speed_ratio(), power::MULT * kind.mult());
+        self.fx.burst(x, y, 24.0);
+        self.fx.ring(x, y, kind.heavy(), true);
+        self.fx.pop(x, y, pts, PopKind::Power);
         self.stats.kills += 1;
     }
 

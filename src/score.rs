@@ -107,6 +107,8 @@ pub enum PopKind {
     Heal,
     /// A sector MOVA had not stood in before.
     Found,
+    /// Killed by a power.
+    Power,
 }
 
 pub struct Pop {
@@ -125,9 +127,9 @@ pub struct Particle {
     pub life: f32,
     pub max_life: f32,
     /// 0 = kill debris, 1 = dash trail, 2 = spark from taking a hit,
-    /// 3 = ember off a MOVA at full speed. [`EMBER`] is that last one; the
-    /// others have no names because nothing outside this module branches on
-    /// them — the renderer maps all three through one arm of a match.
+    /// 3 = ember off a MOVA at full speed, 4 = a glitch thrown by a power.
+    /// [`EMBER`] and [`GLITCH`] are named because other modules branch on
+    /// them; the rest the renderer maps through one arm of a match.
     pub kind: u8,
 }
 
@@ -181,6 +183,9 @@ pub const EMBER_LIFE: f32 = 0.30;
 /// three in two places is a number that can be renumbered in one of them.
 pub const EMBER: u8 = 3;
 
+/// Particle kind for the static a power leaves in the air.
+pub const GLITCH: u8 = 4;
+
 /// Pre-sized so a normal run never allocates here.
 pub struct Fx {
     pub parts: Vec<Particle>,
@@ -230,6 +235,22 @@ impl Fx {
             life,
             max_life: life,
             r: if big { 16.0 } else { 8.0 },
+            mine,
+        });
+    }
+
+    /// A shockwave with an explicit reach, for effects wider than a body.
+    pub fn wave(&mut self, x: f32, y: f32, r: f32, mine: bool) {
+        if self.rings.len() >= 12 {
+            return;
+        }
+        let life = 0.5;
+        self.rings.push(Ring {
+            x,
+            y,
+            life,
+            max_life: life,
+            r,
             mine,
         });
     }

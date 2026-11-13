@@ -11,8 +11,9 @@ cargo run --release
 
 | Key | Action |
 | --- | --- |
-| `W A S D` / arrows | move (momentum, not grid steps) |
+| `W A S D` / `H J K L` / arrows | move (momentum, not grid steps) |
 | `SPACE` | dash — brief burst of speed, short invulnerability |
+| `E` | virus — purge a wide ring around MOVA, then recharge |
 | `P` | pause, without leaving the run |
 | `M` | show / hide the corner radar |
 | `G` | goal ledger, from the menu or the game-over screen |
@@ -33,6 +34,9 @@ matters is where you stand and how fast you are moving when things die.
 - **Combo caps at x10.** It decays on its own if you stop killing, and the window
   gets tighter the higher it goes. Taking a hit resets it to zero.
 - **Waves only get worse.** More enemies, faster enemies, tighter spawns.
+
+**One power so far.** `E` lets a virus loose: everything inside a wide ring
+around MOVA dies at once, pillars included, and the charge refills on its own.
 
 Three hit points. The flash means you got hit.
 
@@ -88,6 +92,7 @@ src/
   region.rs      the six sector names and the lookup
   pickup.rs      pickup kinds, magnet, bob
   player.rs      movement, dash, surge, the full-speed burn, damage
+  power.rs       the power charge and the first power's tuning
   enemy.rs       the three enemy kinds and how they steer around pillars
   projectile.rs  auto-fire and target selection
   score.rs       score, combo, short-lived feedback effects

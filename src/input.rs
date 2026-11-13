@@ -16,6 +16,8 @@ pub struct Input {
     pub down: bool,
     /// Edge triggered: consumed by the first simulation step that sees it.
     pub dash: bool,
+    /// Edge triggered: fires the equipped power.
+    pub power: bool,
 }
 
 impl Input {
@@ -36,6 +38,7 @@ impl Input {
     #[inline]
     pub fn clear_edges(&mut self) {
         self.dash = false;
+        self.power = false;
     }
 }
 
@@ -100,20 +103,53 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
         if k.kind == KeyEventKind::Release {
             // Not all terminals report releases, but honour them when they arrive.
             match k.code {
-                KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => input.left = false,
-                KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => input.right = false,
-                KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => input.up = false,
-                KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => input.down = false,
+                KeyCode::Left
+                | KeyCode::Char('a')
+                | KeyCode::Char('A')
+                | KeyCode::Char('h')
+                | KeyCode::Char('H') => input.left = false,
+                KeyCode::Right
+                | KeyCode::Char('d')
+                | KeyCode::Char('D')
+                | KeyCode::Char('l')
+                | KeyCode::Char('L') => input.right = false,
+                KeyCode::Up
+                | KeyCode::Char('w')
+                | KeyCode::Char('W')
+                | KeyCode::Char('k')
+                | KeyCode::Char('K') => input.up = false,
+                KeyCode::Down
+                | KeyCode::Char('s')
+                | KeyCode::Char('S')
+                | KeyCode::Char('j')
+                | KeyCode::Char('J') => input.down = false,
                 _ => {}
             }
             return;
         }
         match k.code {
-            KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => input.left = true,
-            KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => input.right = true,
-            KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => input.up = true,
-            KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => input.down = true,
+            KeyCode::Left
+            | KeyCode::Char('a')
+            | KeyCode::Char('A')
+            | KeyCode::Char('h')
+            | KeyCode::Char('H') => input.left = true,
+            KeyCode::Right
+            | KeyCode::Char('d')
+            | KeyCode::Char('D')
+            | KeyCode::Char('l')
+            | KeyCode::Char('L') => input.right = true,
+            KeyCode::Up
+            | KeyCode::Char('w')
+            | KeyCode::Char('W')
+            | KeyCode::Char('k')
+            | KeyCode::Char('K') => input.up = true,
+            KeyCode::Down
+            | KeyCode::Char('s')
+            | KeyCode::Char('S')
+            | KeyCode::Char('j')
+            | KeyCode::Char('J') => input.down = true,
             KeyCode::Char(' ') => input.dash = true,
+            KeyCode::Char('e') | KeyCode::Char('E') => input.power = true,
             KeyCode::Enter => *confirm = true,
             KeyCode::Char('g') | KeyCode::Char('G') => *goals = true,
             KeyCode::Char('p') | KeyCode::Char('P') => *pause = true,

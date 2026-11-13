@@ -70,6 +70,8 @@ const PLAYER: char = '●';
 /// A burning ember. Solid and distinct from every other particle so a trail
 /// reads as fire rather than as more of the same dots.
 const FLAME: char = '▲';
+/// A flicker of power static.
+const STATIC: char = '╳';
 const BULLET: char = '·';
 const DUST: char = '·';
 const GRID: char = '·';
@@ -709,6 +711,11 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             // This is the single most important colour decision in the game. It
             // was red, which made the trail the same colour as the thing chasing
             // MOVA — and the trail is longer than the enemy.
+            3 => (
+                FLAME,
+                mix(mix(DEEP, GLARE, a), PALE, (a - 0.6).max(0.0) / 0.4),
+            ),
+            4 => (STATIC, mix(GLARE, COOL, 1.0 - a)),
             _ => (
                 FLAME,
                 mix(mix(DEEP, GLARE, a), PALE, (a - 0.6).max(0.0) / 0.4),
@@ -1291,6 +1298,10 @@ fn draw_pop(buf: &mut Buffer, area: Rect, c: &Cam, p: &crate::score::Pop) {
             s.push_str("NEW+");
             GLARE
         }
+        PopKind::Power => {
+            s.push_str("VIRUS+");
+            GLARE
+        }
     };
     let _ = write!(s, "{}", p.value);
 
@@ -1315,7 +1326,7 @@ fn draw_note(buf: &mut Buffer, area: Rect, c: &Cam, n: &crate::score::Note) {
     let a = (n.life / 1.5).clamp(0.0, 1.0);
     let col = match n.kind {
         PopKind::Heal => PALE,
-        PopKind::Found => GLARE,
+        PopKind::Found | PopKind::Power => GLARE,
         _ => COOL,
     };
     let w = n.text.chars().count() as i32;
@@ -1549,6 +1560,23 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
         &s,
         Style::new().fg(dash).bg(BG),
     );
+
+    // Virus charge, just above the dash readout. It stays on screen while it
+    // fills, because the power is the one thing worth waiting for.
+    if area.width >= 60 {
+        s.clear();
+        let col = if game.power.ready() {
+            s.push_str("VIRUS [E]");
+            GLARE
+        } else {
+            let _ = write!(s, "VIRUS {:02}%", (game.power.ratio() * 100.0) as u32);
+            FAINT
+        };
+        let w = s.chars().count() as i32;
+        let lx = right - w;
+        gap(buf, area, lx - 1, bot - 1, w + 1);
+        line(buf, area, lx, bot - 1, &s, Style::new().fg(col).bg(BG));
+    }
 
     // Surge meter, tucked in above the dash readout. Only drawn while it is
     // live so it costs nothing on a normal run.

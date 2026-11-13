@@ -11,6 +11,7 @@ pub mod goal;
 pub mod input;
 pub mod pickup;
 pub mod player;
+pub mod power;
 pub mod projectile;
 pub mod region;
 pub mod renderer;
