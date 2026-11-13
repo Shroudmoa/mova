@@ -1,19 +1,25 @@
-//! Special powers. One on the rack so far, built to hold the rest.
+//! Special powers. The roster lives here; the effects live with the rules.
 
-/// Seconds between firings.
-pub const CHARGE: f32 = 15.0;
-/// How far a burst reaches, before an enemy's own radius. Wider than the view
-/// on a small terminal, so the power is a purge rather than an aimed shot.
-pub const REACH: f32 = 28.0;
-/// What a power kill pays, before the enemy's own multiplier.
-pub const MULT: f32 = 2.4;
-/// The first of the roster.
-pub const NAME: &str = "VIRUS";
+/// Slots on the rack. A power is just an index into [`CHARGE`], [`NAMES`] and
+/// [`KEYS`], so adding the next one is a line in each list.
+pub const COUNT: usize = 2;
+pub const VIRUS: usize = 0;
+pub const OVERCHARGE: usize = 1;
 
-/// Charge state of the equipped power. Runs start ready, so the first press
-/// shows what the power does instead of asking the player to wait for it.
+/// Seconds between firings, per slot.
+pub const CHARGE: [f32; COUNT] = [15.0, 20.0];
+pub const NAMES: [&str; COUNT] = ["VIRUS", "OVERCHARGE"];
+pub const KEYS: [char; COUNT] = ['E', 'B'];
+
+/// How far a virus burst reaches, before an enemy's own radius.
+pub const VIRUS_REACH: f32 = 28.0;
+/// What a virus kill pays, before the enemy's own multiplier.
+pub const VIRUS_MULT: f32 = 2.4;
+
+/// Charge state of every equipped power. Runs start ready, so the first press
+/// shows what a power does instead of asking the player to wait for it.
 pub struct Power {
-    charge: f32,
+    charge: [f32; COUNT],
 }
 
 impl Default for Power {
@@ -28,26 +34,28 @@ impl Power {
     }
 
     #[inline]
-    pub fn ready(&self) -> bool {
-        self.charge >= CHARGE
+    pub fn ready(&self, slot: usize) -> bool {
+        self.charge[slot] >= CHARGE[slot]
     }
 
     /// 0..1, for the HUD.
     #[inline]
-    pub fn ratio(&self) -> f32 {
-        (self.charge / CHARGE).clamp(0.0, 1.0)
+    pub fn ratio(&self, slot: usize) -> f32 {
+        (self.charge[slot] / CHARGE[slot]).clamp(0.0, 1.0)
     }
 
     pub fn update(&mut self, dt: f32) {
-        self.charge = (self.charge + dt).min(CHARGE);
+        for (charge, full) in self.charge.iter_mut().zip(CHARGE) {
+            *charge = (*charge + dt).min(full);
+        }
     }
 
-    /// Spends the charge. Returns false while it is still filling.
-    pub fn fire(&mut self) -> bool {
-        if !self.ready() {
+    /// Spends one slot's charge. Returns false while it is still filling.
+    pub fn fire(&mut self, slot: usize) -> bool {
+        if !self.ready(slot) {
             return false;
         }
-        self.charge = 0.0;
+        self.charge[slot] = 0.0;
         true
     }
 }

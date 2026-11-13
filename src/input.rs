@@ -17,7 +17,9 @@ pub struct Input {
     /// Edge triggered: consumed by the first simulation step that sees it.
     pub dash: bool,
     /// Edge triggered: fires the equipped power.
-    pub power: bool,
+    pub virus: bool,
+    /// Edge triggered: starts an Overcharge.
+    pub overcharge: bool,
 }
 
 impl Input {
@@ -38,7 +40,8 @@ impl Input {
     #[inline]
     pub fn clear_edges(&mut self) {
         self.dash = false;
-        self.power = false;
+        self.virus = false;
+        self.overcharge = false;
     }
 }
 
@@ -149,7 +152,8 @@ pub fn poll(dt: f32, rep: &mut Repeat) -> (Input, Action) {
             | KeyCode::Char('j')
             | KeyCode::Char('J') => input.down = true,
             KeyCode::Char(' ') => input.dash = true,
-            KeyCode::Char('e') | KeyCode::Char('E') => input.power = true,
+            KeyCode::Char('e') | KeyCode::Char('E') => input.virus = true,
+            KeyCode::Char('b') | KeyCode::Char('B') => input.overcharge = true,
             KeyCode::Enter => *confirm = true,
             KeyCode::Char('g') | KeyCode::Char('G') => *goals = true,
             KeyCode::Char('p') | KeyCode::Char('P') => *pause = true,

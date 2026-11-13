@@ -17,6 +17,7 @@ use crate::game::{Arena, Game, Phase, ARENA_HX, ARENA_HY};
 use crate::goal;
 use crate::pickup::Pickup;
 use crate::player::{Player, DASH_CD};
+use crate::power;
 use crate::region;
 use crate::save;
 use crate::solid::{Solid, SolidGrid, CELL, EMPTY};
@@ -79,6 +80,9 @@ const HP_FULL: char = '▪';
 const HP_EMPTY: char = '▪';
 const SPD_FULL: char = '█';
 const SPD_EMPTY: char = '░';
+/// A power pip: filled while the charge is there, hollow while it fills.
+const PIP_FULL: char = '▪';
+const PIP_EMPTY: char = '·';
 
 // ---- camera ---------------------------------------------------------------
 
@@ -716,6 +720,7 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
                 mix(mix(DEEP, GLARE, a), PALE, (a - 0.6).max(0.0) / 0.4),
             ),
             4 => (STATIC, mix(GLARE, COOL, 1.0 - a)),
+            5 => (DUST, mix(GLARE, DEEP, 1.0 - a)),
             _ => (
                 FLAME,
                 mix(mix(DEEP, GLARE, a), PALE, (a - 0.6).max(0.0) / 0.4),
@@ -834,6 +839,31 @@ fn play(buf: &mut Buffer, area: Rect, game: &Game) {
             Style::new().fg(mix(GLARE, COOL, 1.0 - a)).bg(BG),
         );
     }
+
+    if game.player.overcharged() {
+        let a = (game.player.overcharge / Player::OVERCHARGE_TIME).clamp(0.0, 1.0);
+        let left = game.player.overcharge.ceil() as u32;
+        let mut s = String::with_capacity(16);
+        let _ = write!(s, "OVERCHARGE {}s", left);
+        // Sit above a live Surge readout rather than on top of it.
+        let y = inner.bottom() as i32 - if game.player.surging() { 6 } else { 5 };
+        center(
+            buf,
+            inner,
+            y,
+            &s,
+            Style::new().fg(mix(GLARE, COOL, 1.0 - a)).bg(BG),
+        );
+    }
+
+    // Power charge, last so the world cannot dot over the readout.
+    power_bar(
+        buf,
+        inner,
+        inner.right() as i32 - 1,
+        inner.bottom() as i32 - 1,
+        game,
+    );
 
     // Brief full-screen tint when MOVA takes a hit.
     if game.player.flash > 0.0 {
@@ -1387,6 +1417,51 @@ fn gap(buf: &mut Buffer, area: Rect, x: i32, y: i32, n: i32) {
     }
 }
 
+/// One label and a four-pip charge for each power, right-aligned above the
+/// dash readout. A ready slot pulses; a filling one shows how much is left.
+fn power_bar(buf: &mut Buffer, area: Rect, right: i32, y: i32, game: &Game) {
+    let mut total = 2 * (power::COUNT as i32 - 1);
+    for name in power::NAMES {
+        total += 4 + name.chars().count() as i32 + 1 + 4;
+    }
+    let left = right - total;
+    if left < area.x as i32 + 2 {
+        return;
+    }
+    gap(buf, area, left, y, total);
+
+    let mut x = left;
+    for (i, name) in power::NAMES.iter().enumerate() {
+        let ready = game.power.ready(i);
+        let pulse = 0.5 + 0.5 * (game.time * 7.0).sin();
+        let col = if ready {
+            mix(COOL, GLARE, pulse)
+        } else {
+            FAINT
+        };
+        let mut label = String::with_capacity(16);
+        let _ = write!(label, "[{}] {} ", power::KEYS[i], name);
+        line(buf, area, x, y, &label, Style::new().fg(col).bg(BG));
+        x += label.chars().count() as i32;
+
+        let filled = (game.power.ratio(i) * 4.0).ceil() as i32;
+        for p in 0..4 {
+            let on = p < filled;
+            putc(
+                buf,
+                area,
+                x + p,
+                y,
+                if on { PIP_FULL } else { PIP_EMPTY },
+                Style::new()
+                    .fg(if on && !ready { COOL } else { col })
+                    .bg(BG),
+            );
+        }
+        x += 4 + 2;
+    }
+}
+
 fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
     let top = area.y as i32;
     let bot = area.bottom() as i32 - 1;
@@ -1478,7 +1553,7 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
     let armed = p.armed();
     let blazing = p.blazing();
     s.clear();
-    let _ = write!(s, "SPD {:03}", (ratio * 100.0) as u32);
+    let _ = write!(s, "SPD {:03}%", (ratio * 100.0) as u32);
     let spd_len = s.chars().count() as i32;
     let spd_col = if blazing || armed { GLARE } else { PALE };
     line(buf, area, left, bot, &s, Style::new().fg(spd_col).bg(BG));
@@ -1561,22 +1636,6 @@ fn hud(buf: &mut Buffer, area: Rect, inner: Rect, game: &Game) {
         Style::new().fg(dash).bg(BG),
     );
 
-    // Virus charge, just above the dash readout. It stays on screen while it
-    // fills, because the power is the one thing worth waiting for.
-    if area.width >= 60 {
-        s.clear();
-        let col = if game.power.ready() {
-            s.push_str("VIRUS [E]");
-            GLARE
-        } else {
-            let _ = write!(s, "VIRUS {:02}%", (game.power.ratio() * 100.0) as u32);
-            FAINT
-        };
-        let w = s.chars().count() as i32;
-        let lx = right - w;
-        gap(buf, area, lx - 1, bot - 1, w + 1);
-        line(buf, area, lx, bot - 1, &s, Style::new().fg(col).bg(BG));
-    }
 
     // Surge meter, tucked in above the dash readout. Only drawn while it is
     // live so it costs nothing on a normal run.

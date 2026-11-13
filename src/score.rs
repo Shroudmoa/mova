@@ -127,9 +127,10 @@ pub struct Particle {
     pub life: f32,
     pub max_life: f32,
     /// 0 = kill debris, 1 = dash trail, 2 = spark from taking a hit,
-    /// 3 = ember off a MOVA at full speed, 4 = a glitch thrown by a power.
-    /// [`EMBER`] and [`GLITCH`] are named because other modules branch on
-    /// them; the rest the renderer maps through one arm of a match.
+    /// 3 = ember off a MOVA at full speed, 4 = a glitch thrown by a power,
+    /// 5 = a short-lived mark on the floor. [`EMBER`], [`GLITCH`] and [`MARK`]
+    /// are named because other modules branch on them; the rest the renderer
+    /// maps through one arm of a match.
     pub kind: u8,
 }
 
@@ -185,6 +186,9 @@ pub const EMBER: u8 = 3;
 
 /// Particle kind for the static a power leaves in the air.
 pub const GLITCH: u8 = 4;
+
+/// Particle kind for a scuff a power leaves on the floor.
+pub const MARK: u8 = 5;
 
 /// Pre-sized so a normal run never allocates here.
 pub struct Fx {
@@ -279,6 +283,13 @@ impl Fx {
     #[inline]
     pub fn ember(&mut self, x: f32, y: f32, vx: f32, vy: f32) {
         self.particle(x, y, vx, vy, EMBER_LIFE, EMBER);
+    }
+
+    /// A brief scuff on the floor where a power landed. Stationary on purpose:
+    /// the point is to mark ground that was affected, not to add more debris.
+    #[inline]
+    pub fn mark(&mut self, x: f32, y: f32, life: f32) {
+        self.particle(x, y, 0.0, 0.0, life, MARK);
     }
 
     #[inline]

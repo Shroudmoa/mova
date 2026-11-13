@@ -6,15 +6,14 @@ use crate::score::Fx;
 use crate::solid::SolidGrid;
 
 pub const ACCEL: f32 = 320.0;
+/// How much of the acceleration fades out at the cap. Full throttle still
+/// reaches the top, but the last stretch arrives as a ramp rather than a wall.
+const ACCEL_FADE: f32 = 0.28;
 /// Per-second velocity bleed.
 ///
-/// v3 cut this from 3.6 to 0.5, and that one number is most of what changed
-/// about how the game plays. Speed used to leak away faster than most players
-/// could replace it, so the cap was a thing you arrived at rather than a thing
-/// you held, and every corner cost you the run you had built. Now it leaks
-/// slowly enough that speed is a resource: you spend it on direction changes,
-/// and going straight is how you keep it.
-pub const DRAG: f32 = 0.5;
+/// A touch softer than the old 0.5, just enough to let a line be felt in the
+/// coast without making the cap something the map hands you.
+pub const DRAG: f32 = 0.45;
 /// The ceiling. Higher than v2's 26 because the drag no longer decides how fast
 /// you can go — this does, and a cap you can actually reach in a couple of
 /// seconds is the difference between chasing it and waiting for it.
@@ -63,6 +62,8 @@ pub struct Player {
     pub invuln: f32,
     /// Counts down after a ram, holding the speed cap open above normal.
     pub boost: f32,
+    /// Counts down while an Overcharge lifts the cap and cuts drag.
+    pub overcharge: f32,
     /// Set for one step by a reflection, and consumed by the game layer as a
     /// nova. Not a countdown in the usual sense — it is an event flag, and the
     /// only reason it is a field rather than a return value is that the bounce
@@ -102,6 +103,7 @@ impl Player {
             dash_dy: 1.0,
             invuln: 0.0,
             boost: 0.0,
+            overcharge: 0.0,
             bounce_t: 0.0,
             flash: 0.0,
             surge: 0.0,
@@ -118,6 +120,13 @@ impl Player {
     /// Drag is scaled by this while surging, so a surge run holds its line
     /// rather than merely reaching a higher number once.
     const SURGE_DRAG: f32 = 0.25;
+    /// Seconds of raised cap from an Overcharge.
+    pub const OVERCHARGE_TIME: f32 = 6.0;
+    /// The higher burn tier an Overcharge opens.
+    pub const OVERCHARGE_CAP: f32 = 1.60;
+    /// Drag is cut while overcharged, so the new tier is reachable and holdable
+    /// instead of being a number the cap reports from a distance.
+    const OVERCHARGE_DRAG: f32 = 0.35;
     /// How close to the cap counts as full speed. A hair under, so holding a
     /// direction at the cap counts rather than flickering on float noise.
     pub const BLAZE_EPS: f32 = 0.05;
@@ -130,6 +139,11 @@ impl Player {
     #[inline]
     pub fn surging(&self) -> bool {
         self.surge > 0.0
+    }
+
+    #[inline]
+    pub fn overcharged(&self) -> bool {
+        self.overcharge > 0.0
     }
 
     /// True once MOVA is travelling at the cap. This is the state the whole
@@ -153,6 +167,9 @@ impl Player {
         }
         if self.surge > 0.0 {
             c *= Self::SURGE_CAP;
+        }
+        if self.overcharge > 0.0 {
+            c *= Self::OVERCHARGE_CAP;
         }
         c
     }
@@ -195,6 +212,7 @@ impl Player {
         self.flash = (self.flash - dt).max(0.0);
         self.boost = (self.boost - dt).max(0.0);
         self.surge = (self.surge - dt).max(0.0);
+        self.overcharge = (self.overcharge - dt).max(0.0);
 
         let (ix, iy) = input.axis();
 
@@ -232,14 +250,17 @@ impl Player {
                 fx.particle(self.x, self.y, 0.0, 0.0, 0.18, 1);
             }
 
-            self.vx += ix * ACCEL * dt;
-            self.vy += iy * ACCEL * dt;
+            let accel = ACCEL * (1.0 - ACCEL_FADE * self.speed_ratio().powi(2));
+            self.vx += ix * accel * dt;
+            self.vy += iy * accel * dt;
 
-            let drag = if self.surge > 0.0 {
-                DRAG * Self::SURGE_DRAG
-            } else {
-                DRAG
-            };
+            let mut drag = DRAG;
+            if self.surge > 0.0 {
+                drag *= Self::SURGE_DRAG;
+            }
+            if self.overcharged() {
+                drag *= Self::OVERCHARGE_DRAG;
+            }
             let bleed = (1.0 - drag * dt).max(0.0);
             self.vx *= bleed;
             self.vy *= bleed;
@@ -367,6 +388,12 @@ impl Player {
     /// A Surge pickup connects.
     pub fn surge(&mut self) {
         self.surge = Self::SURGE_TIME;
+    }
+
+    /// An Overcharge connects. The cap and drag are lifted for a few seconds,
+    /// which is a window onto a speed tier normally out of reach.
+    pub fn overcharge(&mut self) {
+        self.overcharge = Self::OVERCHARGE_TIME;
     }
 
     /// A ram connects: MOVA keeps the momentum and gains a good deal more.

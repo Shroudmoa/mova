@@ -819,36 +819,35 @@ impl Game {
         self.stats.kills += 1;
     }
 
+    /// Spends a power when its key comes in. Each slot charges and fires on
+    /// its own, so the two are not a shared resource.
+    fn power_tick(&mut self, input: &mut Input) {
+        if input.virus {
+            input.virus = false;
+            if self.power.fire(power::VIRUS) {
+                self.virus();
+            }
+        }
+        if input.overcharge {
+            input.overcharge = false;
+            if self.power.fire(power::OVERCHARGE) {
+                self.overcharge();
+            }
+        }
+    }
+
     /// The first power: a wide purge that reaches through the map. It is not a
     /// projectile or a shockwave, so pillars do not stop it; what it catches
-    /// simply stops existing. `E` spends a charge, and the charge fills on its
-    /// own, which keeps the power a moment to notice and choose.
-    fn power_tick(&mut self, input: &mut Input) {
-        if !input.power {
-            return;
-        }
-        input.power = false;
-        if !self.power.fire() {
-            return;
-        }
-
+    /// simply stops existing.
+    fn virus(&mut self) {
         let (px, py) = (self.player.x, self.player.y);
-        let reach = power::REACH + max_enemy_r(&self.enemies);
+        let reach = power::VIRUS_REACH + max_enemy_r(&self.enemies);
         let reach2 = reach * reach;
         self.fx.wave(px, py, reach, true);
         self.fx.ring(px, py, true, true);
-        self.fx.note(px, py, power::NAME, PopKind::Power);
-
-        // Static around the blast rather than a tidy circle: the power should
-        // read as interference, not as another gun.
-        for _ in 0..36 {
-            let a = self.rnd() * std::f32::consts::TAU;
-            let d = self.rnd() * reach;
-            let (x, y) = self.arena.wrap(px + a.cos() * d, py + a.sin() * d);
-            let (vx, vy) = (a.cos() * 14.0, a.sin() * 14.0);
-            let life = 0.18 + self.rnd() * 0.28;
-            self.fx.particle(x, y, vx, vy, life, GLITCH);
-        }
+        self.fx.note(px, py, power::NAMES[power::VIRUS], PopKind::Power);
+        self.glitch_burst(px, py, reach, 36);
+        self.mark_floor(px, py, reach, 30);
 
         for ei in 0..self.enemies.len() {
             if self.enemies[ei].dead {
@@ -864,12 +863,54 @@ impl Game {
         }
     }
 
+    /// The second power: open the cap for a few seconds. It does not move MOVA
+    /// itself; it makes the line he is already holding worth more.
+    fn overcharge(&mut self) {
+        self.player.overcharge();
+        let (px, py) = (self.player.x, self.player.y);
+        self.fx.wave(px, py, 14.0, true);
+        self.fx.ring(px, py, true, true);
+        self.fx
+            .note(px, py, power::NAMES[power::OVERCHARGE], PopKind::Power);
+        self.glitch_burst(px, py, 11.0, 18);
+        self.mark_floor(px, py, 11.0, 16);
+    }
+
+    /// Static around a blast rather than a tidy circle: a power should read as
+    /// interference, not as another gun.
+    fn glitch_burst(&mut self, cx: f32, cy: f32, reach: f32, count: usize) {
+        for _ in 0..count {
+            let a = self.rnd() * std::f32::consts::TAU;
+            let d = self.rnd() * reach;
+            let (x, y) = self.arena.wrap(cx + a.cos() * d, cy + a.sin() * d);
+            let (vx, vy) = (a.cos() * 14.0, a.sin() * 14.0);
+            let life = 0.18 + self.rnd() * 0.28;
+            self.fx.particle(x, y, vx, vy, life, GLITCH);
+        }
+    }
+
+    /// Scuffs the ground a power touched. These are stationary and fade where
+    /// they land, so the blast leaves a readable footprint instead of only a
+    /// ring that is already gone.
+    fn mark_floor(&mut self, cx: f32, cy: f32, reach: f32, count: usize) {
+        for _ in 0..count {
+            let a = self.rnd() * std::f32::consts::TAU;
+            let d = self.rnd() * reach;
+            let (x, y) = self.arena.wrap(cx + a.cos() * d, cy + a.sin() * d);
+            if self.solids.hit(x, y, 0.5) {
+                continue;
+            }
+            let life = 0.45 + self.rnd() * 0.5;
+            self.fx.mark(x, y, life);
+        }
+    }
+
     fn power_kill(&mut self, ei: usize) {
         let (x, y) = (self.enemies[ei].x, self.enemies[ei].y);
         let kind = self.enemies[ei].kind;
         let (pts, _) = self
             .score
-            .kill_at(self.player.speed_ratio(), power::MULT * kind.mult());
+            .kill_at(self.player.speed_ratio(), power::VIRUS_MULT * kind.mult());
         self.fx.burst(x, y, 24.0);
         self.fx.ring(x, y, kind.heavy(), true);
         self.fx.pop(x, y, pts, PopKind::Power);

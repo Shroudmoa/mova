@@ -1,7 +1,7 @@
 //! Renders frames to plain text so the layout can be checked without a TTY.
 //!
 //! ```text
-//! cargo run --example preview -- [cols rows] [steps] [seed...]
+//! cargo run --example preview -- [cols rows] [steps] [auto|power|goals|over]
 //! ```
 
 use mova::game::{Game, Phase};
@@ -17,6 +17,7 @@ fn main() {
     let w: u16 = args.first().and_then(|s| s.parse().ok()).unwrap_or(100);
     let h: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
     let steps: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mode = args.get(3).map(String::as_str).unwrap_or("auto");
 
     let area = Rect::new(0, 0, w, h);
     let mut buf = Buffer::empty(area);
@@ -36,6 +37,10 @@ fn main() {
             keys.up = (i / 60) % 2 == 0;
             keys.down = (i / 60) % 2 == 1;
             keys.dash = i % 90 == 0;
+            if mode == "power" {
+                keys.overcharge = i == 10;
+                keys.virus = i + 15 == steps;
+            }
             game.update(1.0 / 120.0, &mut keys);
             keys.clear_edges();
         }
@@ -43,7 +48,6 @@ fn main() {
 
     renderer::render(&mut buf, area, &game);
 
-    let mode = args.get(3).map(String::as_str).unwrap_or("auto");
     let phase = match game.phase {
         Phase::Menu => "menu",
         Phase::Playing => "playing",

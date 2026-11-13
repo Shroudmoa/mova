@@ -782,11 +782,18 @@ fn the_virus_purges_its_ring() {
     let (px, py) = (game.player.x, game.player.y);
     game.enemies = vec![
         Enemy::new(px, py, Kind::Brute, 0.0, 0.0, 1.0),
-        Enemy::new(px + power::REACH, py, Kind::Grunt, 0.0, 0.0, 1.0),
-        Enemy::new(px + power::REACH + 40.0, py, Kind::Grunt, 0.0, 0.0, 1.0),
+        Enemy::new(px + power::VIRUS_REACH, py, Kind::Grunt, 0.0, 0.0, 1.0),
+        Enemy::new(
+            px + power::VIRUS_REACH + 40.0,
+            py,
+            Kind::Grunt,
+            0.0,
+            0.0,
+            1.0,
+        ),
     ];
     let mut keys = Input {
-        power: true,
+        virus: true,
         ..Default::default()
     };
 
@@ -799,12 +806,41 @@ fn the_virus_purges_its_ring() {
         game.enemies.len()
     );
     assert!(
-        Arena::delta_axis(px, game.enemies[0].x, ARENA_HX) > power::REACH,
+        Arena::delta_axis(px, game.enemies[0].x, ARENA_HX) > power::VIRUS_REACH,
         "the survivor was inside the ring"
     );
     assert!(
-        !game.power.ready(),
+        !game.power.ready(power::VIRUS),
         "the virus fired without spending its charge"
+    );
+}
+
+/// The two powers are separate slots: firing one does not spend the other, and
+/// Overcharge lifts the cap without moving MOVA itself.
+#[test]
+fn overcharge_lifts_the_speed_cap() {
+    let mut game = started((100, 30));
+    let base = game.player.cap();
+    let mut keys = Input {
+        overcharge: true,
+        ..Default::default()
+    };
+
+    game.update(1.0 / 120.0, &mut keys);
+
+    assert!(game.player.overcharged(), "B did not start an overcharge");
+    assert!(
+        game.player.cap() > base,
+        "the overcharge cap {} did not rise above {base}",
+        game.player.cap()
+    );
+    assert!(
+        !game.power.ready(power::OVERCHARGE),
+        "the overcharge fired without spending its charge"
+    );
+    assert!(
+        game.power.ready(power::VIRUS),
+        "firing one power spent the other's charge"
     );
 }
 
